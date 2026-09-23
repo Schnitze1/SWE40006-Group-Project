@@ -1,0 +1,121 @@
+# AWS Academy Learner Lab deployment
+#
+# Hard constraints (do not "fix" by adding IAM/OIDC):
+#   * Region is locked to us-east-1 (hardcoded — do not parameterise).
+#   * No IAM role creation, no OIDC providers. Runtime uses the pre-existing LabRole.
+#   * GitHub Actions auth uses static credentials in GitHub secrets only.
+#   * Deploy is update-function-code / S3 sync / CloudFront invalidation only.
+
+name: deploy
+
+on:
+  push:
+    branches: [develop, test, main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  # Lab runtime execution role (created by the academy environment). Never replace.
+  LAB_ROLE: LabRole
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Static Learner Lab credentials — OIDC is NOT available in this environment.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (static secrets only)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          # us-east-1 is locked by Learner Lab — keep hardcoded.
+          aws-region: us-east-1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo tests
+        working-directory: pii-tool
+        run: cargo test --workspace
+
+      - name: Install cargo-lambda
+        run: |
+          pip install cargo-lambda
+          # or: curl -fsSL https://cargo-lambda.github.io/cargo-lambda/install.sh | sh
+
+      - name: Build Rust Lambda (release, arm64)
+        working-directory: pii-tool
+        # Function must already exist with execution role LabRole (pre-provisioned).
+        run: cargo lambda build --release --arm64
+
+      - name: Deploy Lambda (update code only — no role create)
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+        run: |
+          set -euo pipefail
+          ZIP="target/lambda/${LAMBDA_FUNCTION_NAME}/bootstrap.zip"
+          if [ ! -f "$ZIP" ]; then
+            # cargo-lambda names the zip after the binary/package
+            ZIP="$(find target/lambda -name '*.zip' | head -n1)"
+          fi
+          aws lambda update-function-code \
+            --region us-east-1 \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --zip-file "fileb://${ZIP}"
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm run build
+          else
+            echo "No web/package.json — skipping frontend build"
+          fi
+
+      - name: Sync frontend to S3
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ -d web/dist ]; then
+            aws s3 sync web/dist "s3://${S3_BUCKET}" --region us-east-1 --delete
+          elif [ -d web/build ]; then
+            aws s3 sync web/build "s3://${S3_BUCKET}" --region us-east-1 --delete
+          else
+            echo "No frontend build output — skipping S3 sync"
+          fi
+
+      - name: Invalidate CloudFront
+        env:
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          set -euo pipefail
+          aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths "/*"
+
+      - name: Smoke test deployed API
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          echo "Smoke: GET ${API_BASE_URL}/health"
+          curl -fsS --max-time 20 "${API_BASE_URL}/health"
+          echo
+          echo "Smoke: POST ${API_BASE_URL}/api/v1/encode"
+          curl -fsS --max-time 20 \
+            -H 'Content-Type: application/json' \
+            -d '{"sessionId":"ci-smoke","text":"Email smoke@example.com"}' \
+            "${API_BASE_URL}/api/v1/encode"
+          echo

@@ -137,7 +137,7 @@ priority = 110
 id = "date.iso"
 safety_tier = "safe_default"
 class = "custom:date"
-cooperates_with = ["date.us"]
+cooperates_with = ["date.us", "date.mon"]
 enabled = true
 locales = ["global"]
 
@@ -157,7 +157,7 @@ priority = 95
 id = "date.us"
 safety_tier = "safe_default"
 class = "custom:date"
-cooperates_with = ["date.iso"]
+cooperates_with = ["date.iso", "date.mon"]
 enabled = true
 locales = ["global"]
 
@@ -169,6 +169,46 @@ capture_groups = [1]
 [recognizers.scoring]
 base = 0.80
 priority = 94
+
+[recognizers.token]
+
+# DD Mon YYYY / DD Month YYYY: "12 Nov 2031", "22 Sept 2026", "24 September 2026"
+[[recognizers]]
+id = "date.mon"
+safety_tier = "safe_default"
+class = "custom:date"
+cooperates_with = ["date.iso", "date.us"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.88
+priority = 96
+
+[recognizers.token]
+
+# IPv4 CIDR as one token so the /prefix is not left dangling: 10.0.14.0/24
+[[recognizers]]
+id = "ip.v4.cidr"
+safety_tier = "safe_default"
+class = "custom:ip_address"
+cooperates_with = ["ip.v4", "ip.v6"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b((?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)/\d{1,2})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.85
+priority = 100
 
 [recognizers.token]
 

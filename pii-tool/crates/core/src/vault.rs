@@ -94,6 +94,50 @@ pub fn readable_token(token_or_class: &str) -> String {
     format!("[{}]", readable_class(class))
 }
 
+/// Attach a trailing `/prefix` (CIDR) to the preceding IP token so nothing dangles.
+fn absorb_cidr_suffix(text: &str, mappings: &mut [TokenMapping]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            if let Some(close) = text[i..].find(']') {
+                let close_abs = i + close;
+                let token = &text[i..=close_abs];
+                let class = &text[i + 1..close_abs];
+                let end = close_abs + 1;
+                // `/24` immediately after the token?
+                if end < bytes.len() && bytes[end] == b'/' {
+                    let mut p = end + 1;
+                    while p < bytes.len() && bytes[p].is_ascii_digit() {
+                        p += 1;
+                    }
+                    if p > end + 1 {
+                        let prefix = &text[end..p]; // "/24"
+                        if let Some(m) = mappings
+                            .iter_mut()
+                            .find(|m| format!("[{}]", m.class) == token)
+                        {
+                            m.value.push_str(prefix);
+                        }
+                        out.push_str(token);
+                        i = p;
+                        continue;
+                    }
+                }
+                out.push_str(token);
+                let _ = class;
+                i = end;
+                continue;
+            }
+        }
+        let ch_len = text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
 /// Strip a leading name title so "Dr. Sarah Mitchell" and "Sarah Mitchell" link.
 fn person_core_name(value: &str) -> &str {
     const TITLES: [&str; 12] = [
@@ -289,6 +333,10 @@ impl Vault {
             .replace("]>>", "]")
             .replace("<[", "[")
             .replace("]>", "]");
+
+        // CIDR: pull a dangling `/prefix` into the IP mapping so 10.0.14.0/24 is one token.
+        // (core ip.v4 may win the span and leave `/24` behind.)
+        readable_redacted_text = absorb_cidr_suffix(&readable_redacted_text, &mut deduped);
 
         // CHANGE 2: display order follows first appearance in the source text.
         deduped.sort_by_key(|m| m.first_offset);
@@ -1265,5 +1313,69 @@ internal tracking code ABC-1234 and portal version 1.2.3
             .decode(&encoded.redacted_text, &encoded.mappings)
             .unwrap();
         assert_eq!(decoded.restored_text, input);
+    }
+
+    /// DD Mon YYYY / DD Month YYYY (passport, contract, travel dates).
+    #[test]
+    fn date_mon_year_formats_are_detected() {
+        let vault = Vault::new().unwrap();
+        for date in [
+            "12 Nov 2031",
+            "22 Sept 2026",
+            "12 Oct 2026",
+            "24 September 2026",
+            "1 Jan 2020",
+        ] {
+            let encoded = vault.encode(format!("Expires {date}.").as_str()).unwrap();
+            assert!(
+                encoded.mappings.iter().any(|m| m.value.contains(date)
+                    && m.class.to_lowercase().contains("date")),
+                "date {date:?} not detected: {:?}",
+                encoded.mappings
+            );
+            assert!(
+                !encoded.redacted_text.contains(date),
+                "date {date:?} leaked: {}",
+                encoded.redacted_text
+            );
+        }
+    }
+
+    /// IPv4 CIDR must be one token — no dangling `/24`.
+    #[test]
+    fn cidr_ipv4_is_one_token_no_dangling_prefix() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault.encode("Subnet: 10.0.14.0/24").unwrap();
+
+        assert!(
+            encoded
+                .mappings
+                .iter()
+                .any(|m| m.value.contains("10.0.14.0/24") || m.value.contains("10.0.14.0")),
+            "cidr not detected: {:?}",
+            encoded.mappings
+        );
+        assert!(
+            !encoded.redacted_text.contains("/24"),
+            "CIDR prefix left hanging: {}",
+            encoded.redacted_text
+        );
+        assert!(
+            !encoded.redacted_text.contains("10.0.14.0"),
+            "IP leaked: {}",
+            encoded.redacted_text
+        );
+    }
+
+    /// Card expiry/CVV stay put (not PII without the PAN).
+    #[test]
+    fn card_expiry_and_cvv_left_alone() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Visa: 4111-1111-1111-1111 expiry 09/28 CVV 123")
+            .unwrap();
+        assert_preserved(&encoded, "09/28", "card expiry");
+        assert_preserved(&encoded, "123", "cvv");
+        assert_detected(&encoded, "4111-1111-1111-1111", "pan");
     }
 }
