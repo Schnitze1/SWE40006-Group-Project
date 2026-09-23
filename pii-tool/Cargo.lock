@@ -1900,6 +1900,8 @@ dependencies = [
  "gaze-pii",
  "ooxml-wml",
  "pdf_oxide",
+ "proc-macro2",
+ "syn 2.0.119",
 ]
 
 [[package]]

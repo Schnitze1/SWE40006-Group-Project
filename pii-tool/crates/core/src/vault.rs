@@ -201,6 +201,206 @@ fn token_counter(class: &str) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
+fn is_name_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '-' || c == '_'
+}
+
+fn is_name_part(s: &str) -> bool {
+    s.len() >= 3
+        && s.chars()
+            .all(|c| c.is_alphabetic() || c == '\'' || c == '-')
+}
+
+/// True when `pos` sits inside an existing `[Token]` (already redacted).
+fn inside_token(text: &str, pos: usize) -> bool {
+    let before = &text[..pos];
+    let open = before.rfind('[');
+    let close = before.rfind(']');
+    match (open, close) {
+        (Some(o), Some(c)) => o > c,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// If a name title sits immediately before `name_start`, return the title start.
+fn extend_title_start(text: &str, name_start: usize) -> usize {
+    const TITLES: [&str; 12] = [
+        "Prof.", "Prof", "Dr.", "Dr", "Mr.", "Mr", "Mrs.", "Mrs", "Ms.", "Ms", "Mx.", "Mx",
+    ];
+    let before = &text[..name_start];
+    let trimmed = before.trim_end();
+    for title in TITLES {
+        if let Some(rest) = trimmed.strip_suffix(title) {
+            let boundary_ok = rest
+                .chars()
+                .next_back()
+                .map(|c| !is_name_word_char(c))
+                .unwrap_or(true);
+            if boundary_ok {
+                return rest.len();
+            }
+        }
+    }
+    name_start
+}
+
+/// Replace whole-word `needle` with `token`. Optionally include a preceding title.
+fn replace_whole_words(text: &str, needle: &str, token: &str, allow_title: bool) -> String {
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut search = 0;
+    while search < text.len() {
+        let Some(rel) = text[search..].find(needle) else {
+            break;
+        };
+        let start = search + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(is_name_word_char);
+        let after_ok = end >= text.len()
+            || !text[end..].chars().next().is_some_and(is_name_word_char);
+        if before_ok && after_ok && !inside_token(text, start) {
+            let mut repl_start = start;
+            if allow_title {
+                repl_start = extend_title_start(text, start);
+            }
+            spans.push((repl_start, end));
+        }
+        search = end;
+    }
+    let mut out = text.to_string();
+    for (start, end) in spans.into_iter().rev() {
+        out.replace_range(start..end, token);
+    }
+    out
+}
+
+/// Redact bare first/last names that match an already-tokenised PERSON mapping.
+/// Case-sensitive whole words only; never touches text inside `[...]`.
+fn expand_known_person_names(text: &str, mappings: &[TokenMapping]) -> String {
+    let mut out = text.to_string();
+    for m in mappings {
+        let is_name = m.class.contains("Name") || m.class.contains("name");
+        if !is_name {
+            continue;
+        }
+        let token = format!("[{}]", m.class);
+        let core = person_core_name(&m.value);
+        let mut parts = core.split_whitespace();
+        let raw_first = parts.next().unwrap_or("");
+        let first = raw_first.trim_matches(|c: char| !is_name_word_char(c));
+        if is_name_part(first) {
+            out = replace_whole_words(&out, first, &token, false);
+        }
+        let mut last = "";
+        for part in core.split_whitespace() {
+            last = part;
+        }
+        let last = last.trim_matches(|c: char| !is_name_word_char(c));
+        if is_name_part(last) && last != first {
+            out = replace_whole_words(&out, last, &token, true);
+        }
+    }
+    out
+}
+
+/// Class family prefix before the `_<N>` counter (e.g. `Name_3` → `Name`).
+fn class_family(class: &str) -> &str {
+    match class.rfind('_') {
+        Some(i) => &class[..i],
+        None => class,
+    }
+}
+
+/// Stable sort key so IP hosts number by address (10.0.14.22 before 10.0.14.23)
+/// even when PDF extract reorders lines. Other families use first_offset.
+fn renumber_sort_key(m: &TokenMapping) -> (u8, String, String, usize) {
+    let family = class_family(&m.class);
+    let family_l = family.to_lowercase();
+    if family_l.contains("ip") {
+        // Numeric IPv4 first (last octets), then CIDR, then IPv6 / other.
+        let v = m.value.trim();
+        if let Some(key) = ipv4_sort_key(v) {
+            return (0, key, String::new(), m.first_offset);
+        }
+        return (1, String::new(), v.to_string(), m.first_offset);
+    }
+    let _ = family;
+    (2, String::new(), String::new(), m.first_offset)
+}
+
+fn ipv4_sort_key(value: &str) -> Option<String> {
+    let host = value.split('/').next().unwrap_or("");
+    let mut parts = host.split('.');
+    let a = parts.next()?.parse::<u32>().ok()?;
+    let b = parts.next()?.parse::<u32>().ok()?;
+    let c = parts.next()?.parse::<u32>().ok()?;
+    let d = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{a:03}.{b:03}.{c:03}.{d:03}"))
+}
+
+/// Reassign `Class_N` so N is unique per family and stable (offset / IP value).
+/// Uses a two-phase rename via unique placeholders so swaps cannot clobber.
+fn renumber_tokens_by_first_offset(mappings: &mut [TokenMapping], text: &mut String) {
+    let mut order: Vec<usize> = (0..mappings.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ka = renumber_sort_key(&mappings[a]);
+        let kb = renumber_sort_key(&mappings[b]);
+        ka.cmp(&kb)
+    });
+
+    let mut counters: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut updates: Vec<(usize, String)> = Vec::new();
+
+    for idx in order {
+        let m = &mappings[idx];
+        let family = class_family(&m.class).to_string();
+        let family_key = family.clone();
+        let entry = counters.entry(family_key).or_insert(0);
+        *entry += 1;
+        let n = *entry;
+        let new_class = format!("{family}_{n}");
+        if new_class != m.class {
+            let old = m.class.clone();
+            renames.push((old, new_class.clone()));
+        }
+        updates.push((idx, new_class));
+    }
+
+    // Phase 1: old → unique placeholder (longest old first so Name_10 ≠ Name_1).
+    renames.sort_by(|a, b| {
+        let left = b.0.len();
+        let right = a.0.len();
+        left.cmp(&right)
+    });
+    let mut staged: Vec<(String, String)> = Vec::new(); // (placeholder, new)
+    for (i, (old, new)) in renames.iter().enumerate() {
+        let placeholder = format!("\u{E000}TOK{i}\u{E001}");
+        let from = format!("[{old}]");
+        *text = text.replace(&from, &placeholder);
+        let ph = placeholder.clone();
+        staged.push((ph, new.clone()));
+    }
+    // Phase 2: placeholder → new.
+    for (placeholder, new) in &staged {
+        let to = format!("[{new}]");
+        *text = text.replace(placeholder, &to);
+    }
+    for (idx, new_class) in updates {
+        mappings[idx].class = new_class;
+    }
+}
+
 /// Find the next gaze token at or after `from`.
 /// Matches `<hex:Class_N>` and also `<<hex:Class_N>>` (source email wrapped in `<>`).
 fn next_gaze_token(text: &str, from: usize) -> Option<GazeToken> {
@@ -479,6 +679,14 @@ impl Vault {
 
         // CHANGE 2: display order follows first appearance in the source text.
         deduped.sort_by_key(|m| m.first_offset);
+
+        // Session-known-name lookup: bare first/last names that match an existing
+        // PERSON mapping (e.g. "Priya" after "Priya Patel") reuse that token.
+        readable_redacted_text = expand_known_person_names(&readable_redacted_text, &deduped);
+
+        // Keep Class_N counters aligned with first_offset inside each family
+        // (Name_1 is always the earliest name in the source, …).
+        renumber_tokens_by_first_offset(&mut deduped, &mut readable_redacted_text);
 
         Ok(EncodedOutput {
             redacted_text: readable_redacted_text,
@@ -1414,7 +1622,179 @@ internal tracking code ABC-1234 and portal version 1.2.3
         assert_eq!(readable_token("<422c7695:Custom:date_1>"), "[Date_1]");
     }
 
+    // ---------- Split identity / financial class names ----------
+
+    #[test]
+    fn readable_class_split_identity_and_financial() {
+        assert_eq!(readable_class("custom:passport"), "Passport");
+        assert_eq!(readable_class("custom:tfn"), "Tfn");
+        assert_eq!(readable_class("custom:medicare"), "Medicare");
+        assert_eq!(readable_class("custom:dln"), "Dln");
+        assert_eq!(readable_class("custom:employee"), "Employee");
+        assert_eq!(readable_class("custom:ssn"), "Ssn");
+        assert_eq!(readable_class("custom:swift"), "Swift");
+        assert_eq!(readable_class("custom:payroll"), "Payroll");
+        assert_eq!(readable_class("custom:iban"), "Iban");
+    }
+
     // ---------- CHANGE 2 — mapping display order by first appearance ----------
+
+    // ---------- Session-known-name lookup (bare first / last) ----------
+
+    #[test]
+    fn session_name_expands_bare_first_name() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Hiring manager: Priya Patel. Priya will review.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Hiring manager: [Name_1]. [Name_1] will review.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_expands_bare_first_name_emergency() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Emergency contact: Michael Chen. Michael is the spouse.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Emergency contact: [Name_1]. [Name_1] is the spouse.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_expands_title_plus_surname() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Contact Dr. Sarah Mitchell. Dr. Mitchell will confirm.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Contact [Name_1]. [Name_1] will confirm.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_whole_word_no_substring() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Contact Dr. Sarah Mitchell. The Mitchella plant grows here.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Contact [Name_1]. The Mitchella plant grows here.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_skips_short_first_names() {
+        let vault = Vault::new().unwrap();
+        // "Ed Li" — first name too short to expand; must not wipe "Ed" elsewhere.
+        let encoded = vault
+            .encode("Hiring manager: Dr. Edward Li. Ed will review.")
+            .unwrap();
+        assert!(
+            encoded.redacted_text.contains("Ed will review"),
+            "short/ambiguous given name must not be expanded: {}",
+            encoded.redacted_text
+        );
+    }
+
+    // ---------- token order follows first_offset ----------
+
+    #[test]
+    fn mappings_sorted_by_first_offset() {
+        let path = format!("{}/../../sample.txt", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let vault = Vault::new().unwrap();
+        let encoded = vault.encode(&text).unwrap();
+        let mut prev = 0usize;
+        for m in &encoded.mappings {
+            assert!(
+                m.first_offset >= prev,
+                "mappings not sorted by first_offset: {:?} after offset {}",
+                m,
+                prev
+            );
+            prev = m.first_offset;
+        }
+    }
+
+    #[test]
+    fn name_token_numbers_follow_first_offset() {
+        let path = format!("{}/../../sample.txt", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let vault = Vault::new().unwrap();
+        let encoded = vault.encode(&text).unwrap();
+        let names: Vec<&TokenMapping> = encoded
+            .mappings
+            .iter()
+            .filter(|m| m.class.contains("Name"))
+            .collect();
+        assert!(names.len() >= 2, "need multiple names: {:?}", names);
+        for pair in names.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let na = token_counter(&a.class);
+            let nb = token_counter(&b.class);
+            assert!(
+                na < nb,
+                "Name token numbers must increase with first_offset: {:?} ({} @ {}) then {:?} ({} @ {})",
+                a.value,
+                a.class,
+                a.first_offset,
+                b.value,
+                b.class,
+                b.first_offset
+            );
+        }
+    }
+
+    #[test]
+    fn section5_person_token_before_section6_occupation() {
+        // 张伟 (handwritten note) appears before "Sarah Mitchell — Senior …".
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode(
+                "Please CC 张伟 (zhang.wei@example.cn).\n\
+                 Occupations:\n  - Sarah Mitchell — Senior Software Engineer\n",
+            )
+            .unwrap();
+        let zhang = encoded
+            .mappings
+            .iter()
+            .find(|m| m.value.contains("张伟"))
+            .expect("张伟 mapping");
+        let sarah = encoded
+            .mappings
+            .iter()
+            .find(|m| m.value.contains("Sarah Mitchell"))
+            .expect("Sarah mapping");
+        let nz = token_counter(&zhang.class);
+        let ns = token_counter(&sarah.class);
+        assert!(
+            zhang.first_offset < sarah.first_offset,
+            "fixture order: {:?}",
+            encoded.mappings
+        );
+        assert!(
+            nz < ns,
+            "section-5 person must get a lower Name_N than section-6 occupation: {} vs {}",
+            zhang.class,
+            sarah.class
+        );
+    }
 
     #[test]
     fn change2_mappings_sorted_by_first_appearance_in_source() {
