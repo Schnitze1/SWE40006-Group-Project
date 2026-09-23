@@ -14,6 +14,8 @@ pub struct TokenMapping {
     pub token: String,
     pub value: String,
     pub class: String,
+    /// Byte offset of the value's first occurrence in the source text (display sort key).
+    pub first_offset: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -54,10 +56,42 @@ fn is_session_token_inner(inner: &str) -> bool {
     !hex.is_empty()
         && hex.chars().all(|c| c.is_ascii_hexdigit())
         && class.contains('_')
+        // ANYTHING after the session hex: letters, digits, colons, hyphens, underscores.
         && class
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '-')
         && class.chars().last().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Last `_N` segment after the final `:` or `-`, first letter capitalised.
+/// `Email_4` → `Email_4`; `Custom:date_1` → `Date_1`;
+/// `Custom:family:payment-card-or-iban_1` → `Iban_1`.
+fn readable_class(raw_class: &str) -> String {
+    let last = raw_class
+        .rsplit([':', '-'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(raw_class);
+    let mut chars = last.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => raw_class.to_string(),
+    }
+}
+
+/// Turn a full gaze token (or raw class) into the readable `[Iban_1]` form.
+pub fn readable_token(token_or_class: &str) -> String {
+    let mut inner = token_or_class.trim();
+    while inner.starts_with('<') {
+        inner = &inner[1..];
+    }
+    while inner.ends_with('>') {
+        inner = &inner[..inner.len() - 1];
+    }
+    let class = match inner.find(':') {
+        Some(i) => &inner[i + 1..],
+        None => inner,
+    };
+    format!("[{}]", readable_class(class))
 }
 
 /// Strip a leading name title so "Dr. Sarah Mitchell" and "Sarah Mitchell" link.
@@ -152,14 +186,14 @@ impl Vault {
             return Err(VaultError::Pipeline("Expected Text document".into()));
         };
 
-        let mut mappings = Vec::new();
+        let mut mappings: Vec<TokenMapping> = Vec::new();
         let mut readable_redacted_text = clean_text.clone();
 
         // Gaze emits <session_hex:Class_N>. When the source span was already wrapped
         // in <angle brackets>, the redacted form is <<session_hex:Class_N>>.
         let mut cursor = 0;
         while let Some(tok) = next_gaze_token(&clean_text, cursor) {
-            let class_name = tok.class.clone();
+            let class_name = readable_class(&tok.class);
             let readable_token = format!("[{}]", class_name);
 
             let original_value = self
@@ -169,11 +203,20 @@ impl Vault {
                 .map(|v| v.to_string());
 
             if let Some(original_value) = original_value {
-                if !mappings.iter().any(|m: &TokenMapping| m.token == tok.session_key) {
+                let first_offset = text.find(&original_value).unwrap_or(usize::MAX);
+                if let Some(existing) = mappings
+                    .iter_mut()
+                    .find(|m| m.token == tok.session_key)
+                {
+                    if first_offset < existing.first_offset {
+                        existing.first_offset = first_offset;
+                    }
+                } else {
                     mappings.push(TokenMapping {
                         token: tok.session_key.clone(),
                         value: original_value,
                         class: class_name,
+                        first_offset,
                     });
                 }
                 readable_redacted_text = readable_redacted_text.replace(&tok.raw, &readable_token);
@@ -207,11 +250,17 @@ impl Vault {
                 .get(&m.value)
                 .cloned()
                 .unwrap_or_else(|| m.class.clone());
-            if !deduped.iter().any(|d| d.value == m.value) {
+            if let Some(existing) = deduped.iter_mut().find(|d| d.value == m.value) {
+                if m.first_offset < existing.first_offset {
+                    existing.first_offset = m.first_offset;
+                }
+                existing.class = canonical;
+            } else {
                 deduped.push(TokenMapping {
                     token: m.token,
                     value: m.value,
                     class: canonical,
+                    first_offset: m.first_offset,
                 });
             }
         }
@@ -240,6 +289,9 @@ impl Vault {
             .replace("]>>", "]")
             .replace("<[", "[")
             .replace("]>", "]");
+
+        // CHANGE 2: display order follows first appearance in the source text.
+        deduped.sort_by_key(|m| m.first_offset);
 
         Ok(EncodedOutput {
             redacted_text: readable_redacted_text,
@@ -347,6 +399,7 @@ Note that version 1.2.3 of the API and the product code ABC-1234 should remain u
             token: format!("<test:{}>", class),
             value: value.to_string(),
             class: class.to_string(),
+            first_offset: 0,
         }
     }
 
@@ -1144,5 +1197,73 @@ internal tracking code ABC-1234 and portal version 1.2.3
                 );
             }
         }
+    }
+
+    // ---------- CHANGE 1 — session prefix / complex family tokens ----------
+
+    #[test]
+    fn change1_family_iban_token_becomes_readable() {
+        assert_eq!(
+            readable_token("<680311de:Custom:family:payment-card-or-iban_1>"),
+            "[Iban_1]"
+        );
+    }
+
+    #[test]
+    fn change1_simple_email_token_unchanged() {
+        assert_eq!(readable_token("<422c7695:Email_4>"), "[Email_4]");
+    }
+
+    #[test]
+    fn change1_custom_date_token_capitalises() {
+        assert_eq!(readable_token("<422c7695:Custom:date_1>"), "[Date_1]");
+    }
+
+    // ---------- CHANGE 2 — mapping display order by first appearance ----------
+
+    #[test]
+    fn change2_mappings_sorted_by_first_appearance_in_source() {
+        let vault = Vault::new().unwrap();
+        // Email appears after the phone number in the source.
+        let input = "Call (555) 867-5309 then email zoe.last@example.com.";
+        let encoded = vault.encode(input).unwrap();
+
+        assert!(
+            encoded.mappings.len() >= 2,
+            "need ≥2 mappings: {:?}",
+            encoded.mappings
+        );
+        let phone_idx = input.find("5309").unwrap();
+        let email_idx = input.find("zoe.last@example.com").unwrap();
+        let phone_pos = encoded
+            .mappings
+            .iter()
+            .position(|m| m.value.contains("5309"))
+            .expect("phone mapping");
+        let email_pos = encoded
+            .mappings
+            .iter()
+            .position(|m| m.value.contains("zoe.last@example.com"))
+            .expect("email mapping");
+
+        assert!(
+            phone_pos < email_pos,
+            "mappings must follow source order (phone@{phone_idx} before email@{email_idx}): {:?}",
+            encoded.mappings
+        );
+        assert!(
+            encoded.mappings[phone_pos].first_offset <= encoded.mappings[email_pos].first_offset
+        );
+    }
+
+    #[test]
+    fn change2_mapping_sort_is_display_order_only() {
+        let vault = Vault::new().unwrap();
+        let input = "Call (555) 867-5309 then email zoe.last@example.com.";
+        let encoded = vault.encode(input).unwrap();
+        let decoded = vault
+            .decode(&encoded.redacted_text, &encoded.mappings)
+            .unwrap();
+        assert_eq!(decoded.restored_text, input);
     }
 }

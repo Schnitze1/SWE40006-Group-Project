@@ -148,10 +148,18 @@ fn main() {
                             } else {
                                 println!("\n✓ Redacted {} entities.\n", num_entities);
                                 println!("Mapping:");
+                                // EncodedOutput.mappings are already in first-appearance order.
                                 for m in &encoded.mappings {
                                     println!("[{}] → {}", m.class, m.value);
-                                    
-                                    if !session_mappings.iter().any(|existing| existing.token == m.token) {
+
+                                    if let Some(existing) = session_mappings
+                                        .iter_mut()
+                                        .find(|existing| existing.token == m.token)
+                                    {
+                                        if m.first_offset < existing.first_offset {
+                                            existing.first_offset = m.first_offset;
+                                        }
+                                    } else {
                                         session_mappings.push(m.clone());
                                     }
                                 }
@@ -206,8 +214,11 @@ fn main() {
                 if session_mappings.is_empty() {
                     println!("No mappings in current session.");
                 } else {
+                    // CHANGE 2: first-appearance order in the source, not alpha/ID.
+                    let mut ordered: Vec<&TokenMapping> = session_mappings.iter().collect();
+                    ordered.sort_by_key(|m| m.first_offset);
                     println!("{:<15} {:<30} {:<15}", "Token", "Value", "Class");
-                    for m in &session_mappings {
+                    for m in ordered {
                         let token = format!("[{}]", m.class);
                         let class_base = m.class.split('_').next().unwrap_or(&m.class);
                         println!("{:<15} {:<30} {:<15}", token, m.value, class_base);
