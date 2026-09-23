@@ -12,7 +12,8 @@ pub enum ExtractError {
 /// Rejoin identifiers that PDF extraction splits across newlines
 /// (emails, phone digit runs). Ordinary sentence breaks are preserved.
 pub fn unwrap_split_identifiers(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
+    let capacity = text.len();
+    let mut out = String::with_capacity(capacity);
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         out.push_str(line);

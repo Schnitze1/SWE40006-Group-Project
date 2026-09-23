@@ -96,7 +96,8 @@ pub fn readable_token(token_or_class: &str) -> String {
 
 /// Attach a trailing `/prefix` (CIDR) to the preceding IP token so nothing dangles.
 fn absorb_cidr_suffix(text: &str, mappings: &mut [TokenMapping]) -> String {
-    let mut out = String::with_capacity(text.len());
+    let capacity = text.len();
+    let mut out = String::with_capacity(capacity);
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -150,6 +151,15 @@ fn person_core_name(value: &str) -> &str {
         }
     }
     value
+}
+
+/// Numeric suffix of `Name_2` / `Email_10` — lower wins when collapsing variants.
+fn token_counter(class: &str) -> u32 {
+    class
+        .rsplit('_')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
 }
 
 /// Find the next gaze token at or after `from`.
@@ -281,7 +291,8 @@ impl Vault {
         let mut value_to_class: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for m in &mappings {
-            let entry = value_to_class.entry(m.value.clone()).or_insert_with(|| m.class.clone());
+            let value_key = m.value.clone();
+            let entry = value_to_class.entry(value_key).or_insert_with(|| m.class.clone());
             if *entry != m.class {
                 let from = format!("[{}]", m.class);
                 let to = format!("[{entry}]");
@@ -326,6 +337,83 @@ impl Vault {
                 readable_redacted_text = readable_redacted_text.replace(core, &token);
             }
         }
+
+        // Collapse titled / bare / case variants of one person onto a single token
+        // (Mask shared-label behaviour: "Dr. Priya Nair" and "Priya Nair" are one entity).
+        let mut core_to_class: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for m in &deduped {
+            let is_name = m.class.contains("Name") || m.class.contains("name");
+            if !is_name {
+                continue;
+            }
+            let core = person_core_name(&m.value).to_lowercase();
+            if core.is_empty() {
+                continue;
+            }
+            match core_to_class.get(&core) {
+                None => {
+                    let class_name = m.class.clone();
+                    core_to_class.insert(core, class_name);
+                }
+                Some(existing) => {
+                    // Prefer the earliest session counter (Name_1 beats Name_2) so
+                    // cross-document variants keep the first-seen token.
+                    let incoming = token_counter(&m.class);
+                    let current = token_counter(existing);
+                    if incoming < current {
+                        let class_name = m.class.clone();
+                        core_to_class.insert(core, class_name);
+                    }
+                }
+            }
+        }
+        for m in &deduped {
+            let is_name = m.class.contains("Name") || m.class.contains("name");
+            if !is_name {
+                continue;
+            }
+            let core = person_core_name(&m.value).to_lowercase();
+            let Some(canonical) = core_to_class.get(&core) else {
+                continue;
+            };
+            if *canonical == m.class {
+                continue;
+            }
+            let from = format!("[{}]", m.class);
+            let to = format!("[{canonical}]");
+            readable_redacted_text = readable_redacted_text.replace(&from, &to);
+        }
+        let mut collapsed: Vec<TokenMapping> = Vec::new();
+        for m in deduped {
+            let is_name = m.class.contains("Name") || m.class.contains("name");
+            let canonical = if is_name {
+                let core = person_core_name(&m.value).to_lowercase();
+                core_to_class
+                    .get(&core)
+                    .cloned()
+                    .unwrap_or_else(|| m.class.clone())
+            } else {
+                m.class.clone()
+            };
+            if let Some(existing) = collapsed.iter_mut().find(|d| {
+                d.class == canonical
+                    && person_core_name(&d.value).to_lowercase()
+                        == person_core_name(&m.value).to_lowercase()
+            }) {
+                if m.first_offset < existing.first_offset {
+                    existing.first_offset = m.first_offset;
+                }
+            } else {
+                collapsed.push(TokenMapping {
+                    token: m.token,
+                    value: m.value,
+                    class: canonical,
+                    first_offset: m.first_offset,
+                });
+            }
+        }
+        let mut deduped = collapsed;
 
         // Strip any surrounding < > left after replacing wrapped tokens (e.g. `<[Email_1]>`).
         readable_redacted_text = readable_redacted_text
@@ -380,10 +468,14 @@ impl Vault {
                                 .unwrap_or_else(|| mapping.value.clone());
 
                             if !replacements.iter().any(|(t, _)| t == readable_token) {
-                                replacements.push((readable_token.to_string(), original_value));
+                                let token_text = readable_token.to_string();
+                                replacements.push((token_text, original_value));
                             }
-                        } else if !hallucinations.contains(&readable_token.to_string()) {
-                            hallucinations.push(readable_token.to_string());
+                        } else {
+                            let token_text = readable_token.to_string();
+                            if !hallucinations.contains(&token_text) {
+                                hallucinations.push(token_text);
+                            }
                         }
                     }
 
@@ -397,7 +489,11 @@ impl Vault {
         }
 
         // Replace longer tokens first so [Email_10] is not clobbered by [Email_1].
-        replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        replacements.sort_by(|a, b| {
+            let left = b.0.len();
+            let right = a.0.len();
+            left.cmp(&right)
+        });
         let mut restored_text = llm_response.to_string();
         for (token, value) in replacements {
             restored_text = restored_text.replace(&token, &value);

@@ -160,7 +160,8 @@ fn main() {
                                             existing.first_offset = m.first_offset;
                                         }
                                     } else {
-                                        session_mappings.push(m.clone());
+                                        let copy = m.clone();
+                                        session_mappings.push(copy);
                                     }
                                 }
                             }
