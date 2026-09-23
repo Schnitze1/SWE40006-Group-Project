@@ -1,0 +1,126 @@
+================================================================================
+CONFIDENTIAL — EMPLOYEE ONBOARDING DOSSIER
+Reference: ONB-2026-Q3-0147
+Generated: 24 September 2026
+Classification: Internal / Restricted
+================================================================================
+
+SECTION 1 — PRIMARY CANDIDATE
+
+We are processing onboarding for our new hire, Dr. Sarah Elizabeth Mitchell.
+Her preferred name is Sarah, but legal documents must use the full name above.
+Date of birth: 14/03/1988. Nationality: Australian.
+Passport number: PA1234567 (Australian). Expiry: 12 Nov 2031.
+
+Contact details:
+  Mobile:     +61 412 345 678
+  Office:     (02) 9876 5432 ext. 214
+  Personal:   sarah.mitchell+onboarding@example.com
+  University: <s.mitchell@university.edu>
+  Backup:     sarah [dot] mitchell [at] gmail [dot] com
+
+Home address:
+  42 Beacon Street
+  Boston, MA 02108
+  United States
+
+Alternate (Australian) address:
+  Unit 7/15 Harbour Esplanade, Docklands VIC 3008
+
+SECTION 2 — SENSITIVE IDENTIFIERS
+
+Social Security Number:    123-45-6789
+Australian TFN:            123 456 789
+Medicare number:           2123 45670 1
+Driver's licence (MA):     S12345678
+Employee ID:               EMP-0098421
+Payroll account (BSB/Acc): 062-000 / 1234 5678
+IBAN (UK):                 GB29 NWBK 6016 1331 9268 19
+SWIFT/BIC:                 NWBKGB2L
+
+Corporate card on file:
+  Visa:    4111-1111-1111-1111   expiry 09/28   CVV 123
+  Amex:    3782 822463 10005     expiry 06/27
+  Mastercard: 5555 5555 5555 4444
+
+SECTION 3 — SECONDARY CONTACTS
+
+Hiring manager: Priya Patel
+  Email: priya.patel@university.edu
+  Direct line: +1-617-555-0198
+  Office: 100 Cambridge Street, Suite 2100, Boston MA 02114
+
+Emergency contact: Michael Chen (spouse)
+  Phone: 617.555.0142
+  Email: m.chen@personal-domain.io
+  Relationship: Spouse
+  Address: same as primary candidate
+
+Reference contact: Prof. James O'Brien-Smith
+  Department of Computer Science, University of Melbourne
+  Parkville VIC 3010, Australia
+  j.obrien-smith@unimelb.edu.au
+
+SECTION 4 — TECHNICAL DETAILS (should NOT be redacted)
+
+Internal tracking code:     ABC-1234
+Portal version:             1.2.3
+Deployment tag:             v2026.09.24-rc1
+Invoice number:             INV-2026-0918
+Purchase order:             PO-88-4412
+Case reference:             CASE-2026-0042
+Ticket:                     JIRA-9821
+
+Server infrastructure:
+  Primary host:    10.0.14.22
+  Backup host:     10.0.14.23
+  Subnet:          10.0.14.0/24
+  IPv6:            2001:0db8:85a3::8a2e:0370:7334
+  Gateway MAC:     00:1B:44:11:3A:B7
+
+API credentials (rotate immediately):
+  AWS Access Key:  AKIAIOSFODNN7EXAMPLE
+  AWS Secret:      wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  GitHub token:    ghp_1234567890abcdefghijklmnopqrstuvwxyz
+  JWT (sample):    eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U
+
+Wallet addresses (for contractor payments):
+  BTC: bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+  ETH: 0x742d35Cc6634C0532925a3b844Bc454e4438f44e
+
+SECTION 5 — SIGNATURES & NOTES
+
+Signed:
+  /s/ Sarah E. Mitchell            Date: 2026-09-24
+  /s/ Priya Patel                  Date: 2026-09-24
+
+Handwritten note (transcribed):
+  "Please CC José Müller (jose.muller@firma.de) and 张伟 
+   (zhang.wei@example.cn) on all future correspondence. 
+   José can be reached at +49 30 1234 5678, and 张伟 at 
+   +86 138 0013 8000."
+
+Travel itinerary (already approved):
+  Flight QF401 SYD→MEL on 12 Oct 2026
+  Hotel: Park Hyatt Melbourne, 1 Parliament Square
+
+SECTION 6 — MISCELLANEOUS (mixed sensitivity)
+
+Occupations on file:
+  - Sarah Mitchell — Senior Software Engineer
+  - Priya Patel — HR Business Partner
+  - Michael Chen — Financial Analyst (spouse, not employee)
+
+Public company info (should NOT be redacted):
+  - Microsoft Corporation (NASDAQ: MSFT)
+  - BHP Group Limited (ASX: BHP)
+  - Commonwealth Bank (ASX: CBA)
+
+Meeting notes:
+  Sarah prefers to be contacted before 9am AEDT.
+  We discussed salary band 4 ($145,000–$165,000 AUD).
+  Negotiation was handled by Priya on 22 Sept 2026.
+
+================================================================================
+END OF DOSSIER
+================================================================================

@@ -1,0 +1,10 @@
+[package]
+name = "pii-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pdf_oxide = "0.3"
+ooxml-wml = "0.1"
+gaze-pii = "0.12.0"
+gaze-assembly = "0.12.0"

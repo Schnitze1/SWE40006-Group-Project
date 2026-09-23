@@ -1,0 +1,233 @@
+schema_version = "0.1.0"
+rulepack_id = "pii-poc-extra"
+rulepack_version = "0.1.0"
+default_locales = ["global"]
+
+# Titles + person names: "Dr. Sarah Mitchell", "Ms. Priya Patel"
+[[recognizers]]
+id = "name.title"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.cue", "name.role_comma", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+)'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.90
+priority = 120
+
+[recognizers.token]
+family = "name.counter"
+
+# Cue + person names: "contact …", "account for …", "under the name …",
+# "reach out to the hiring manager, Priya Patel".
+# IMPORTANT: only the cue is case-insensitive — a global (?i) would let
+# "contact information is as follows" match as a person name.
+[[recognizers]]
+id = "name.cue"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.title", "name.role_comma", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(?i:under\s+the\s+name|account\s+for|name\s+is|named|contact|cc|c\.c\.|reach\s+out\s+to|please\s+reach\s+out\s+to|hiring\s+manager|manager|recruiter|coordinator|supervisor)\s*,?\s+((?:(?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+)'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.88
+priority = 115
+
+[recognizers.token]
+family = "name.counter"
+
+# Role, First Last — "the hiring manager, Priya Patel"
+[[recognizers]]
+id = "name.role_comma"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.title", "name.cue", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(?i:hiring\s+manager|manager|recruiter|coordinator|supervisor|director|contact|lead)\s*,\s*((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+)'''
+capture_groups = [2]
+
+[recognizers.scoring]
+base = 0.90
+priority = 116
+
+[recognizers.token]
+family = "name.counter"
+
+# Loose North-American phone so fixture numbers like (555) 867-5309 are redacted
+# even when the strict E.164 parser rejects them.
+[[recognizers]]
+id = "phone.na.loose"
+safety_tier = "safe_default"
+class = "custom:phone"
+cooperates_with = ["phone.structural", "phone.e164.spaced", "phone.national.de", "phone.national.us", "phone.e164.intl"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?:^|[^[:alnum:]_+])((?:\+?1[\s.-]*)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[\s.-]*[2-9]\d{2}[\s.-]*\d{4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.75
+priority = 70
+
+[recognizers.token]
+
+# E.164 international / German landline style: +49 30 1234 5678, +61 412 345 678,
+# +1-617-555-0198, +86 138 0013 8000. Requires a leading '+' so dates/refs are safe.
+[[recognizers]]
+id = "phone.e164.intl"
+safety_tier = "safe_default"
+class = "custom:phone"
+cooperates_with = ["phone.structural", "phone.e164.spaced", "phone.national.de", "phone.national.us", "phone.na.loose"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?:^|[^[:alnum:]_+])(\+[1-9]\d{0,2}[\s\-]?(?:\d[\s\-]?){6,14}\d)\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.80
+priority = 82
+
+[recognizers.token]
+
+# SSN with flexible cue spacing ("SSN 123-45-6789", "SSN on file is 123-45-6789").
+# core's ssn.us only allows [:#-]? between the cue and the number.
+[[recognizers]]
+id = "ssn.poc"
+safety_tier = "safe_default"
+class = "custom:ssn"
+cooperates_with = ["ssn.us"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(?:ssn|social\s+security(?:\s+number)?|ss#)\s*(?:on\s+file\s+(?:is|as)\s+|number\s*(?:is|:)\s+|is\s+|:\s+|#\s+|-?\s*)?(\d{3}-\d{2}-\d{4}|\d{9})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.90
+priority = 110
+
+[recognizers.token]
+
+# ISO dates: 2024-03-15
+[[recognizers]]
+id = "date.iso"
+safety_tier = "safe_default"
+class = "custom:date"
+cooperates_with = ["date.us"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(\d{4}-\d{2}-\d{2})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.85
+priority = 95
+
+[recognizers.token]
+
+# US dates: 03/15/2024 or 3/15/24
+[[recognizers]]
+id = "date.us"
+safety_tier = "safe_default"
+class = "custom:date"
+cooperates_with = ["date.iso"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(\d{1,2}/\d{1,2}/\d{2,4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.80
+priority = 94
+
+[recognizers.token]
+
+# Full street address: 42 Beacon Street, Boston, MA 02108
+[[recognizers]]
+id = "location.street_full"
+safety_tier = "safe_default"
+class = "location"
+cooperates_with = ["location.street", "location.city_state_zip"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(\d{1,5}\s+(?:[A-Z][a-z]+\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\.?,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\s*\d{5})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.92
+priority = 125
+
+[recognizers.token]
+
+# Street only: 42 Beacon Street
+[[recognizers]]
+id = "location.street"
+safety_tier = "safe_default"
+class = "location"
+cooperates_with = ["location.street_full", "location.city_state_zip"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(\d{1,5}\s+(?:[A-Z][a-z]+\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\.?)\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.85
+priority = 120
+
+[recognizers.token]
+
+# City, ST ZIP: Boston, MA 02108
+[[recognizers]]
+id = "location.city_state_zip"
+safety_tier = "safe_default"
+class = "location"
+cooperates_with = ["location.street_full", "location.street"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\s*\d{5})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.88
+priority = 118
+
+[recognizers.token]
