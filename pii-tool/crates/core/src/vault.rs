@@ -153,6 +153,45 @@ fn person_core_name(value: &str) -> &str {
     value
 }
 
+/// Org / company names — never treat "Microsoft Corporation" / "BHP Group Limited" as PII names.
+fn is_org_like_name(value: &str) -> bool {
+    const ORG_LAST: [&str; 10] = [
+        "Corporation",
+        "Corp",
+        "Corp.",
+        "Inc",
+        "Inc.",
+        "Ltd",
+        "Ltd.",
+        "Limited",
+        "Group",
+        "LLC",
+    ];
+    const ORG_WORDS: [&str; 8] = [
+        "Corporation",
+        "Corp",
+        "Inc",
+        "Ltd",
+        "Limited",
+        "Group",
+        "LLC",
+        "Company",
+    ];
+    let words: Vec<&str> = value.split_whitespace().collect();
+    if words.len() < 2 {
+        return false;
+    }
+    if let Some(last) = words.last() {
+        if ORG_LAST.contains(last) {
+            return true;
+        }
+    }
+    words.iter().any(|w| {
+        let bare = w.trim_end_matches(['.', ',']);
+        ORG_WORDS.contains(&bare)
+    })
+}
+
 /// Numeric suffix of `Name_2` / `Email_10` — lower wins when collapsing variants.
 fn token_counter(class: &str) -> u32 {
     class
@@ -413,7 +452,19 @@ impl Vault {
                 });
             }
         }
-        let mut deduped = collapsed;
+        // Reject org/company false positives ("Microsoft Corporation").
+        let mut kept: Vec<TokenMapping> = Vec::new();
+        for m in collapsed {
+            let is_name = m.class.contains("Name") || m.class.contains("name") || m.class.contains("Location");
+            if is_org_like_name(&m.value) {
+                let token = format!("[{}]", m.class);
+                readable_redacted_text = readable_redacted_text.replace(&token, &m.value);
+                continue;
+            }
+            let _ = is_name;
+            kept.push(m);
+        }
+        let mut deduped = kept;
 
         // Strip any surrounding < > left after replacing wrapped tokens (e.g. `<[Email_1]>`).
         readable_redacted_text = readable_redacted_text
