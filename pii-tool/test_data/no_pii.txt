@@ -1,0 +1,3 @@
+The deployment pipeline runs unit tests, builds the Rust Lambda 
+binary, and syncs static assets to S3. CloudFront invalidation 
+runs after each successful deploy.

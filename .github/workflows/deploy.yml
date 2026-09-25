@@ -1,0 +1,87 @@
+# AWS Academy Learner Lab deployment
+#
+# Hard constraints (do not "fix" by adding IAM/OIDC):
+#   * Region is locked to us-east-1 (hardcoded — do not parameterise).
+#   * No IAM role creation, no OIDC providers. Runtime uses the pre-existing LabRole.
+#   * GitHub Actions auth uses static credentials in GitHub secrets only.
+#   * Deploy is update-function-code / S3 sync / CloudFront invalidation only.
+
+name: Deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pii-tool
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pii-tool
+      - name: Run tests
+        run: cargo test --workspace
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pii-tool
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pii-tool
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Install cargo-lambda
+        run: pip install cargo-lambda
+
+      - name: Build Lambda
+        env:
+          # ort-sys (ONNX Runtime) needs the C++ standard library at link time.
+          CXXSTDLIB: stdc++
+          RUSTFLAGS: "-C link-arg=-lstdc++"
+        run: cargo lambda build --release --arm64 -p poco-lambda
+
+      - name: Deploy to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name poco-pii-api-handler-dev \
+            --zip-file fileb://target/lambda/poco-lambda/bootstrap.zip \
+            --region us-east-1
+          aws lambda wait function-updated \
+            --function-name poco-pii-api-handler-dev \
+            --region us-east-1
+
+      - name: Test
+        run: |
+          URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/dev/health"
+          echo "Testing $URL"
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ test passed"
+              curl -s "$URL"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "X test failed"
+          exit 1

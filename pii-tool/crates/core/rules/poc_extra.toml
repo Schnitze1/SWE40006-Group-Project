@@ -3,18 +3,19 @@ rulepack_id = "pii-poc-extra"
 rulepack_version = "0.1.0"
 default_locales = ["global"]
 
-# Titles + person names: "Dr. Sarah Mitchell", "Ms. Priya Patel"
+# Titles + person names: "Dr. Sarah Mitchell", "Ms. Priya Patel", "Prof. James O'Brien-Smith"
+# Allow apostrophes and hyphens in surnames (O'Brien-Smith) and Latin accents (José Müller).
 [[recognizers]]
 id = "name.title"
 safety_tier = "safe_default"
 class = "Name"
-cooperates_with = ["name.cue", "name.role_comma", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
+cooperates_with = ["name.cue", "name.role_comma", "name.role_label", "name.signature", "name.dash_role", "name.paren_email", "name.cjk", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
 enabled = true
 locales = ["global"]
 
 [recognizers.match]
 kind = "regex"
-pattern = '''\b((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+)'''
+pattern = '''\b((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+[A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+)'''
 capture_groups = [1]
 
 [recognizers.scoring]
@@ -24,21 +25,19 @@ priority = 120
 [recognizers.token]
 family = "name.counter"
 
-# Cue + person names: "contact …", "account for …", "under the name …",
-# "reach out to the hiring manager, Priya Patel".
-# IMPORTANT: only the cue is case-insensitive — a global (?i) would let
-# "contact information is as follows" match as a person name.
+# Cue + person names. Only the cue is case-insensitive. Allow ':', ',', or space
+# after the cue so "Hiring manager: Priya Patel" works.
 [[recognizers]]
 id = "name.cue"
 safety_tier = "safe_default"
 class = "Name"
-cooperates_with = ["name.title", "name.role_comma", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
+cooperates_with = ["name.title", "name.role_comma", "name.role_label", "name.signature", "name.dash_role", "name.paren_email", "name.cjk", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
 enabled = true
 locales = ["global"]
 
 [recognizers.match]
 kind = "regex"
-pattern = '''\b(?i:under\s+the\s+name|account\s+for|name\s+is|named|contact|cc|c\.c\.|reach\s+out\s+to|please\s+reach\s+out\s+to|hiring\s+manager|manager|recruiter|coordinator|supervisor)\s*,?\s+((?:(?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+)'''
+pattern = '''\b(?i:under\s+the\s+name|account\s+for|name\s+is|named|contact|\bcc\b|c\.c\.|reach\s+out\s+to|please\s+reach\s+out\s+to|hiring\s+manager|emergency\s+contact|reference\s+contact|manager|recruiter|coordinator|supervisor)\s*[:,]?\s*(?:(?i:Mobile|Email|Phone|Office|Address|Fax|Website|Contact|Backup|Personal|University|DOB|Name|SSN|Direct(?:\s+line)?)\b|((?:(?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?[A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+))'''
 capture_groups = [1]
 
 [recognizers.scoring]
@@ -53,18 +52,63 @@ family = "name.counter"
 id = "name.role_comma"
 safety_tier = "safe_default"
 class = "Name"
-cooperates_with = ["name.title", "name.cue", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
+cooperates_with = ["name.title", "name.cue", "name.role_label", "name.signature", "name.dash_role", "name.paren_email", "name.cjk", "email.header.name", "email.header.name.paren", "name.forward_marker", "name.agent_recipient", "name.auto_footer"]
 enabled = true
 locales = ["global"]
 
 [recognizers.match]
 kind = "regex"
-pattern = '''\b(?i:hiring\s+manager|manager|recruiter|coordinator|supervisor|director|contact|lead)\s*,\s*((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+)'''
+pattern = '''\b(?i:hiring\s+manager|emergency\s+contact|reference\s+contact|manager|recruiter|coordinator|supervisor|director|contact|lead)\s*,\s*(?:(?i:Mobile|Email|Phone|Office|Address|Fax|Website|Contact|Backup|Personal|University|DOB|Name|SSN|Direct(?:\s+line)?)\b|((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?([A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+))'''
 capture_groups = [2]
 
 [recognizers.scoring]
 base = 0.90
 priority = 116
+
+[recognizers.token]
+family = "name.counter"
+
+# Role-colon names: "Hiring manager: Priya Patel", "Emergency contact: Michael Chen (spouse)"
+# Label exclusion list (never PERSON): Mobile, Email, Phone, Office, Address, Fax,
+# Website, Contact, Direct line, Backup, Personal, University, DOB, Name, SSN.
+# The label alternative matches first and captures nothing; only the name arm captures.
+[[recognizers]]
+id = "name.role_label"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.title", "name.cue", "name.role_comma", "name.signature", "name.dash_role", "name.paren_email", "name.cjk", "email.header.name"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(?i:hiring\s+manager|emergency\s+contact|reference\s+contact|primary\s+candidate|candidate|contact\s+details)\s*:\s*(?:(?i:Mobile|Email|Phone|Office|Address|Fax|Website|Contact|Backup|Personal|University|DOB|Name|SSN|Direct(?:\s+line)?)\b|((?:(?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?[A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+))'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.91
+priority = 118
+
+[recognizers.token]
+family = "name.counter"
+
+# Signature lines: "/s/ Sarah E. Mitchell"
+[[recognizers]]
+id = "name.signature"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.title", "name.cue", "name.role_label", "name.role_comma", "name.dash_role", "name.paren_email", "name.cjk"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?:/s/|Signed:)[ \t]*((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?([A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+?)(?:[ \t]+Date\b|[ \t]*$)'''
+capture_groups = [2]
+
+[recognizers.scoring]
+base = 0.92
+priority = 122
 
 [recognizers.token]
 family = "name.counter"
@@ -75,7 +119,7 @@ family = "name.counter"
 id = "phone.na.loose"
 safety_tier = "safe_default"
 class = "custom:phone"
-cooperates_with = ["phone.structural", "phone.e164.spaced", "phone.national.de", "phone.national.us", "phone.e164.intl"]
+cooperates_with = ["phone.structural", "phone.e164.spaced", "phone.national.de", "phone.national.us", "phone.e164.intl", "phone.au", "phone.dotted"]
 enabled = true
 locales = ["global"]
 
@@ -96,7 +140,7 @@ priority = 70
 id = "phone.e164.intl"
 safety_tier = "safe_default"
 class = "custom:phone"
-cooperates_with = ["phone.structural", "phone.e164.spaced", "phone.national.de", "phone.national.us", "phone.na.loose"]
+cooperates_with = ["phone.structural", "phone.e164.spaced", "phone.national.de", "phone.national.us", "phone.na.loose", "phone.au", "phone.dotted"]
 enabled = true
 locales = ["global"]
 
@@ -111,8 +155,153 @@ priority = 82
 
 [recognizers.token]
 
-# SSN with flexible cue spacing ("SSN 123-45-6789", "SSN on file is 123-45-6789").
-# core's ssn.us only allows [:#-]? between the cue and the number.
+# ---------------------------------------------------------------------------
+# Identity / financial IDs — specific classes first (before generic custom:ssn).
+# Each rule owns a first-class class name so exact-category scoring is honest.
+# ---------------------------------------------------------------------------
+
+# Passport: "Passport number: PA1234567"
+[[recognizers]]
+id = "id.passport"
+safety_tier = "safe_default"
+class = "custom:passport"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(?:passport(?:\s+(?:number|no\.?|#))?)\s*[:#-]?\s*([A-Z]{1,2}\d{6,9})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.95
+priority = 130
+
+[recognizers.token]
+
+# Australian TFN: "Australian TFN: 123 456 789"
+[[recognizers]]
+id = "id.tfn"
+safety_tier = "safe_default"
+class = "custom:tfn"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(?:tfn|tax\s+file\s+number)\s*(?:\(?\w+\)?\s*)?[:#-]?\s*(\d{3}\s\d{3}\s\d{3}|\d{9})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.95
+priority = 130
+
+[recognizers.token]
+
+# Medicare: "Medicare number: 2123 45670 1"
+[[recognizers]]
+id = "id.medicare"
+safety_tier = "safe_default"
+class = "custom:medicare"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(?:medicare(?:\s+number)?)\s*[:#-]?\s*(\d{4}\s\d{5}\s\d)'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.95
+priority = 130
+
+[recognizers.token]
+
+# Driver's licence: "Driver's licence (MA): S12345678"
+[[recognizers]]
+id = "id.dln"
+safety_tier = "safe_default"
+class = "custom:dln"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(?:driver'?s?\s+licen[cs]e|licen[cs]e)\s*(?:\([A-Z]{2}\)\s*)?[:#-]?\s*([A-Z]\d{6,10})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.95
+priority = 128
+
+[recognizers.token]
+
+# Employee ID: EMP-0098421
+[[recognizers]]
+id = "id.employee"
+safety_tier = "safe_default"
+class = "custom:employee"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i:\b(?:employee\s+id|emp(?:loyee)?\s*(?:id|number)?)\s*[:#-]?\s*)(EMP-\d{5,10}|\d{5,10})\b|\b(EMP-\d{5,10})\b'''
+capture_groups = [1, 2]
+
+[recognizers.scoring]
+base = 0.94
+priority = 128
+
+[recognizers.token]
+
+# Payroll BSB/account: "062-000 / 1234 5678"
+[[recognizers]]
+id = "id.payroll"
+safety_tier = "safe_default"
+class = "custom:payroll"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i)\b(?:payroll|bsb|account)\b[^0-9]{0,20}(\d{3}-\d{3}\s*/\s*\d{4}\s*\d{4})'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.94
+priority = 128
+
+[recognizers.token]
+
+# SWIFT/BIC: NWBKGB2L — only after an explicit label (prevents "IDENTIFIERS" → IBAN).
+[[recognizers]]
+id = "id.swift"
+safety_tier = "safe_default"
+class = "custom:swift"
+cooperates_with = []
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?i:\b(?:swift(?:/bic)?|bic)\s*[:#-]?\s+)([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.94
+priority = 128
+
+[recognizers.token]
+
+# SSN fallback with flexible cue spacing ("SSN 123-45-6789").
+# Specific identity rules above win on priority; this remains custom:ssn.
 [[recognizers]]
 id = "ssn.poc"
 safety_tier = "safe_default"
@@ -137,7 +326,7 @@ priority = 110
 id = "date.iso"
 safety_tier = "safe_default"
 class = "custom:date"
-cooperates_with = ["date.us"]
+cooperates_with = ["date.us", "date.mon"]
 enabled = true
 locales = ["global"]
 
@@ -157,7 +346,7 @@ priority = 95
 id = "date.us"
 safety_tier = "safe_default"
 class = "custom:date"
-cooperates_with = ["date.iso"]
+cooperates_with = ["date.iso", "date.mon"]
 enabled = true
 locales = ["global"]
 
@@ -172,18 +361,58 @@ priority = 94
 
 [recognizers.token]
 
-# Full street address: 42 Beacon Street, Boston, MA 02108
+# DD Mon YYYY / DD Month YYYY: "12 Nov 2031", "22 Sept 2026", "24 September 2026"
 [[recognizers]]
-id = "location.street_full"
+id = "date.mon"
 safety_tier = "safe_default"
-class = "location"
-cooperates_with = ["location.street", "location.city_state_zip"]
+class = "custom:date"
+cooperates_with = ["date.iso", "date.us"]
 enabled = true
 locales = ["global"]
 
 [recognizers.match]
 kind = "regex"
-pattern = '''\b(\d{1,5}\s+(?:[A-Z][a-z]+\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\.?,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\s*\d{5})\b'''
+pattern = '''(?i)\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.88
+priority = 96
+
+[recognizers.token]
+
+# IPv4 CIDR as one token so the /prefix is not left dangling: 10.0.14.0/24
+[[recognizers]]
+id = "ip.v4.cidr"
+safety_tier = "safe_default"
+class = "custom:ip_address"
+cooperates_with = ["ip.v4", "ip.v6"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b((?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)/\d{1,2})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.85
+priority = 100
+
+[recognizers.token]
+
+# Full street address: 42 Beacon Street, Boston, MA 02108
+[[recognizers]]
+id = "location.street_full"
+safety_tier = "safe_default"
+class = "location"
+cooperates_with = ["location.street", "location.city_state_zip", "location.au_locality", "location.unit"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b(\d{1,5}[ \t]+(?:[A-Z][a-z]+[ \t]+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\.?,[ \t]*[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)*,[ \t]*[A-Z]{2}[ \t]*\d{5})\b'''
 capture_groups = [1]
 
 [recognizers.scoring]
@@ -192,18 +421,18 @@ priority = 125
 
 [recognizers.token]
 
-# Street only: 42 Beacon Street
+# Street only: 42 Beacon Street, 1 Parliament Square, … Harbour Esplanade
 [[recognizers]]
 id = "location.street"
 safety_tier = "safe_default"
 class = "location"
-cooperates_with = ["location.street_full", "location.city_state_zip"]
+cooperates_with = ["location.street_full", "location.city_state_zip", "location.unit", "location.au_locality"]
 enabled = true
 locales = ["global"]
 
 [recognizers.match]
 kind = "regex"
-pattern = '''\b(\d{1,5}\s+(?:[A-Z][a-z]+\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\.?)\b'''
+pattern = '''\b(\d{1,5}[ \t]+(?:[A-Z][\w'’-]+[ \t]+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl|Square|Sq|Esplanade|Esp|Parade|Pde|Terrace|Tce)\.?)\b'''
 capture_groups = [1]
 
 [recognizers.scoring]
@@ -212,18 +441,19 @@ priority = 120
 
 [recognizers.token]
 
-# City, ST ZIP: Boston, MA 02108
+# City, ST ZIP: Boston, MA 02108  (comma optional → "Boston MA 02114")
+# Horizontal whitespace only — never join across a line break.
 [[recognizers]]
 id = "location.city_state_zip"
 safety_tier = "safe_default"
 class = "location"
-cooperates_with = ["location.street_full", "location.street"]
+cooperates_with = ["location.street_full", "location.street", "location.au_locality", "location.unit"]
 enabled = true
 locales = ["global"]
 
 [recognizers.match]
 kind = "regex"
-pattern = '''\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\s*\d{5})\b'''
+pattern = '''\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)*,?[ \t]+[A-Z]{2}[ \t]*\d{5})\b'''
 capture_groups = [1]
 
 [recognizers.scoring]
@@ -231,3 +461,146 @@ base = 0.88
 priority = 118
 
 [recognizers.token]
+
+# Australian locality: "Docklands VIC 3008", "Parkville VIC 3010"
+[[recognizers]]
+id = "location.au_locality"
+safety_tier = "safe_default"
+class = "location"
+cooperates_with = ["location.street", "location.city_state_zip", "location.unit", "location.street_full"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)*[ \t]+(?:VIC|NSW|QLD|SA|WA|TAS|ACT|NT)[ \t]+\d{4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.90
+priority = 119
+
+[recognizers.token]
+
+# Unit / building fragment: "Unit 7/15 Harbour Esplanade", "1 Parliament Square"
+[[recognizers]]
+id = "location.unit"
+safety_tier = "safe_default"
+class = "location"
+cooperates_with = ["location.street", "location.street_full", "location.au_locality", "location.city_state_zip"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b((?:Unit|Suite|Level|Apt\.?|Apartment)[ \t]+\d{1,4}(?:/\d{1,4})?(?:[ \t]+[A-Z][\w'’-]+){1,5}|\d{1,5}[ \t]+(?:[A-Z][\w'’-]+[ \t]+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl|Square|Sq|Esplanade|Esp|Parade|Pde|Terrace|Tce)\.?)'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.87
+priority = 117
+
+[recognizers.token]
+
+# AU landline: (02) 9876 5432, 03 9876 5432
+[[recognizers]]
+id = "phone.au"
+safety_tier = "safe_default"
+class = "custom:phone"
+cooperates_with = ["phone.na.loose", "phone.e164.intl", "phone.structural", "phone.dotted"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?:^|[^[:alnum:]_+])(\(\s*0[2-478]\s*\)\s*\d{4}[\s.-]*\d{4}|0[2-478][\s.-]*\d{4}[\s.-]*\d{4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.86
+priority = 84
+
+[recognizers.token]
+
+# Dotted NANP: 617.555.0142
+[[recognizers]]
+id = "phone.dotted"
+safety_tier = "safe_default"
+class = "custom:phone"
+cooperates_with = ["phone.na.loose", "phone.e164.intl", "phone.au"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''(?:^|[^[:alnum:]_+])([2-9]\d{2}\.[2-9]\d{2}\.\d{4})\b'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.84
+priority = 80
+
+[recognizers.token]
+
+# Bare multi-word names near "Signed:" / occupation dash lines (José Müller, Sarah Mitchell)
+[[recognizers]]
+id = "name.dash_role"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.title", "name.cue", "name.role_label", "name.signature", "name.paren_email", "name.cjk", "name.role_comma"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b((?:Dr|Mr|Ms|Mrs|Mx|Prof)\.?\s+)?([A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+)[ \t]+[—–-][ \t]+(?:Senior|Junior|HR|Financial|Software|Lead|Chief|Head)'''
+capture_groups = [2]
+
+[recognizers.scoring]
+base = 0.89
+priority = 114
+
+[recognizers.token]
+family = "name.counter"
+
+# Parenthetical person after email: "José Müller (jose.muller@firma.de)"
+[[recognizers]]
+id = "name.paren_email"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.title", "email.header.name.paren", "name.cue", "name.dash_role", "name.cjk", "name.signature", "name.role_label"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b([A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+(?:[ \t][A-Z]\.)?(?:[ \t][A-ZÀ-Þ][\w'’À-ÖØ-öø-ÿ-]+)+)[ \t]+\([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\)'''
+capture_groups = [1]
+
+[recognizers.scoring]
+base = 0.90
+priority = 113
+
+[recognizers.token]
+family = "name.counter"
+
+# CJK given+family (2–3 ideographs) after "CC" / "and" / before email paren
+[[recognizers]]
+id = "name.cjk"
+safety_tier = "safe_default"
+class = "Name"
+cooperates_with = ["name.paren_email", "email.header.name", "name.title", "name.cue", "name.dash_role", "name.signature", "name.role_label", "name.role_comma"]
+enabled = true
+locales = ["global"]
+
+[recognizers.match]
+kind = "regex"
+pattern = '''\b([一-鿿]{2,3})\s+\([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\)|\band\s+([一-鿿]{2,3})'''
+capture_groups = [1, 2]
+
+[recognizers.scoring]
+base = 0.86
+priority = 108
+
+[recognizers.token]
+family = "name.counter"
