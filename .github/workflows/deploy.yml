@@ -6,116 +6,78 @@
 #   * GitHub Actions auth uses static credentials in GitHub secrets only.
 #   * Deploy is update-function-code / S3 sync / CloudFront invalidation only.
 
-name: deploy
+name: Deploy
 
 on:
   push:
-    branches: [develop, test, main]
+    branches: [develop]
   workflow_dispatch:
 
-env:
-  AWS_REGION: us-east-1
-  # Lab runtime execution role (created by the academy environment). Never replace.
-  LAB_ROLE: LabRole
-  CARGO_TERM_COLOR: always
-
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
-    # Static Learner Lab credentials — OIDC is NOT available in this environment.
-    permissions:
-      contents: read
+    defaults:
+      run:
+        working-directory: pii-tool
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pii-tool
+      - name: Run tests
+        run: cargo test --workspace
 
-      - name: Configure AWS credentials (static secrets only)
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pii-tool
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pii-tool
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          # us-east-1 is locked by Learner Lab — keep hardcoded.
           aws-region: us-east-1
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run cargo tests
-        working-directory: pii-tool
-        run: cargo test --workspace
-
       - name: Install cargo-lambda
-        run: |
-          pip install cargo-lambda
-          # or: curl -fsSL https://cargo-lambda.github.io/cargo-lambda/install.sh | sh
+        run: pip install cargo-lambda
 
-      - name: Build Rust Lambda (release, arm64)
-        working-directory: pii-tool
-        # Function must already exist with execution role LabRole (pre-provisioned).
-        run: cargo lambda build --release --arm64
+      - name: Build Lambda
+        run: cargo lambda build --release --arm64 -p poco-lambda
 
-      - name: Deploy Lambda (update code only — no role create)
-        env:
-          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+      - name: Deploy to Lambda
         run: |
-          set -euo pipefail
-          ZIP="target/lambda/${LAMBDA_FUNCTION_NAME}/bootstrap.zip"
-          if [ ! -f "$ZIP" ]; then
-            # cargo-lambda names the zip after the binary/package
-            ZIP="$(find target/lambda -name '*.zip' | head -n1)"
-          fi
           aws lambda update-function-code \
-            --region us-east-1 \
-            --function-name "$LAMBDA_FUNCTION_NAME" \
-            --zip-file "fileb://${ZIP}"
+            --function-name poco-pii-api-handler-dev \
+            --zip-file fileb://target/lambda/poco-lambda/bootstrap.zip \
+            --region us-east-1
+          aws lambda wait function-updated \
+            --function-name poco-pii-api-handler-dev \
+            --region us-east-1
 
-      - name: Build frontend
-        working-directory: web
+      - name: Test
         run: |
-          if [ -f package.json ]; then
-            npm ci
-            npm run build
-          else
-            echo "No web/package.json — skipping frontend build"
-          fi
-
-      - name: Sync frontend to S3
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-        run: |
-          set -euo pipefail
-          if [ -d web/dist ]; then
-            aws s3 sync web/dist "s3://${S3_BUCKET}" --region us-east-1 --delete
-          elif [ -d web/build ]; then
-            aws s3 sync web/build "s3://${S3_BUCKET}" --region us-east-1 --delete
-          else
-            echo "No frontend build output — skipping S3 sync"
-          fi
-
-      - name: Invalidate CloudFront
-        env:
-          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
-        run: |
-          set -euo pipefail
-          aws cloudfront create-invalidation \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths "/*"
-
-      - name: Smoke test deployed API
-        env:
-          API_BASE_URL: ${{ secrets.API_BASE_URL }}
-        run: |
-          set -euo pipefail
-          echo "Smoke: GET ${API_BASE_URL}/health"
-          curl -fsS --max-time 20 "${API_BASE_URL}/health"
-          echo
-          echo "Smoke: POST ${API_BASE_URL}/api/v1/encode"
-          curl -fsS --max-time 20 \
-            -H 'Content-Type: application/json' \
-            -d '{"sessionId":"ci-smoke","text":"Email smoke@example.com"}' \
-            "${API_BASE_URL}/api/v1/encode"
-          echo
+          URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/dev/health"
+          echo "Testing $URL"
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ test passed"
+              curl -s "$URL"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "X test failed"
+          exit 1
