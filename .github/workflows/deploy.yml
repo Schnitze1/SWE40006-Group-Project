@@ -50,13 +50,27 @@ jobs:
             exit 1
           fi
 
-      - name: Build inside cargo-lambda container
+      - name: Build Lambda in Amazon Linux 2023 container (glibc 2.34)
         run: |
           docker run --rm \
             -v "$PWD":/work \
             -w /work/pii-tool \
-            ghcr.io/cargo-lambda/cargo-lambda:latest \
-            cargo lambda build --release --compiler cargo -p poco-lambda --output-format zip
+            amazonlinux:2023 bash -c '
+              set -euo pipefail
+              dnf install -y gcc gcc-c++ make zip unzip openssl-devel git
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              source "$HOME/.cargo/env"
+              cargo build --release -p poco-lambda
+              mkdir -p target/lambda/poco-lambda
+              cp target/release/poco-lambda target/lambda/poco-lambda/bootstrap
+              chmod +x target/lambda/poco-lambda/bootstrap
+              echo "=== binary ==="
+              file target/lambda/poco-lambda/bootstrap
+              ldd target/lambda/poco-lambda/bootstrap || true
+              (cd target/lambda/poco-lambda && zip -q bootstrap.zip bootstrap)
+              echo "=== zip ==="
+              unzip -l target/lambda/poco-lambda/bootstrap.zip
+            '
 
       - name: Verify artifact
         run: |
@@ -65,17 +79,6 @@ jobs:
           ZIP=$(find pii-tool/target -name "bootstrap.zip" -type f | head -n1)
           echo "Found: $ZIP"
           unzip -l "$ZIP"
-          echo "=== binary arch (must be aarch64) ==="
-          TMP=$(mktemp -d)
-          unzip -q -o "$ZIP" -d "$TMP"
-          find "$TMP" -type f | head -20
-          BIN=$(find "$TMP" -type f -name 'bootstrap' | head -n1)
-          if [ -n "$BIN" ]; then
-            file "$BIN"
-            aarch64-linux-gnu-readelf -d "$BIN" 2>/dev/null | grep NEEDED || readelf -d "$BIN" | grep NEEDED || true
-          else
-            echo "WARN: no bootstrap entry in zip"
-          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -87,7 +90,17 @@ jobs:
 
       - name: Deploy to Lambda
         run: |
+          set -euo pipefail
+          echo "=== caller identity ==="
+          aws sts get-caller-identity || true
           ZIP=$(find pii-tool/target -name "bootstrap.zip" -type f | head -n1)
+          echo "ZIP=$ZIP"
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: bootstrap.zip not found"
+            find pii-tool/target -type f | head -50
+            exit 1
+          fi
+          ls -la "$ZIP"
           aws lambda update-function-code \
             --function-name ${{ steps.env.outputs.lambda }} \
             --zip-file fileb://$ZIP \
@@ -95,6 +108,11 @@ jobs:
           aws lambda wait function-updated \
             --function-name ${{ steps.env.outputs.lambda }} \
             --region us-east-1
+          aws lambda get-function-configuration \
+            --function-name ${{ steps.env.outputs.lambda }} \
+            --region us-east-1 \
+            --query '{Runtime:Runtime,Handler:Handler,Arch:Architectures,LastUpdateStatus:LastUpdateStatus}' \
+            --output json
 
       - name: Smoke test
         run: |
