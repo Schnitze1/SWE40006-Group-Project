@@ -68,7 +68,7 @@ jobs:
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CXXSTDLIB: stdc++
-        run: cargo lambda build --release --arm64 --compiler cargo -p poco-lambda
+        run: cargo lambda build --release --target aarch64-unknown-linux-gnu.2.34 -p poco-lambda
 
       - name: Deploy to Lambda
         run: |
