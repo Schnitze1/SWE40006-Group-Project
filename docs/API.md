@@ -1,7 +1,7 @@
 # PII Vault API (v1) 
 
 Runtime: AWS Lambda (Rust) behind API Gateway, **us-east-1**, AWS Academy Learner Lab.  
-Session store: DynamoDB table `pii-sessions` (LabRole — no custom IAM).
+Session store: DynamoDB table `pii-sessions-{env}` (LabRole — no custom IAM).
 
 All request/response bodies are JSON (`Content-Type: application/json`).  
 All timestamps are **Unix epoch seconds** (numbers).  
@@ -244,5 +244,5 @@ async function decode(sessionId, text) {
 
 * Region is **hardcoded `us-east-1`**.
 * Lambda execution role is the pre-existing **`LabRole`** — never create IAM roles or OIDC providers.
-* DynamoDB `pii-sessions` TTL on `expiresAt` = **86400 seconds** (24h).
+* DynamoDB `pii-sessions-{env}` TTL on `expiresAt` = **86400 seconds** (24h).
 * CI deploys with **static** `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` GitHub secrets only.
