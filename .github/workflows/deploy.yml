@@ -1,16 +1,20 @@
-# AWS Academy Learner Lab deployment
+# AWS Academy Learner Lab deployment — routes by branch to dev/test/staging/prod.
 #
 # Hard constraints (do not "fix" by adding IAM/OIDC):
 #   * Region is locked to us-east-1 (hardcoded — do not parameterise).
 #   * No IAM role creation, no OIDC providers. Runtime uses the pre-existing LabRole.
 #   * GitHub Actions auth uses static credentials in GitHub secrets only.
-#   * Deploy is update-function-code / S3 sync / CloudFront invalidation only.
+#   * Deploy is update-function-code only.
 
 name: Deploy
 
 on:
   push:
-    branches: [develop]
+    branches:
+      - develop
+      - 'test/**'
+      - 'release/**'
+      - main
   workflow_dispatch:
 
 permissions:
@@ -46,6 +50,27 @@ jobs:
         with:
           workspaces: pii-tool
 
+      - name: Determine environment
+        id: env
+        run: |
+          REF="${{ github.ref }}"
+          if [[ "$REF" == "refs/heads/develop" ]]; then
+            echo "name=dev" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler-dev" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == refs/heads/test/* ]]; then
+            echo "name=test" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler-test" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == refs/heads/release/* ]]; then
+            echo "name=staging" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler-staging" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == "refs/heads/main" ]]; then
+            echo "name=prod" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler" >> $GITHUB_OUTPUT
+          else
+            echo "Unknown branch: $REF"
+            exit 1
+          fi
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -64,7 +89,7 @@ jobs:
 
       - name: Build Lambda
         env:
-          # ONNX Runtime (ort-sys) is C++; link with g++ so libstdc++ is pulled in.
+          # ONNX Runtime (ort-sys) is C++; g++ as linker pulls in libstdc++.
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-g++
@@ -73,7 +98,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo lambda build --release --arm64 -p poco-lambda
-          # Normalise zip path for the deploy step.
           mkdir -p target/lambda/poco-lambda
           if [ ! -f target/lambda/poco-lambda/bootstrap.zip ]; then
             ZIP="$(find target/lambda -name '*.zip' | head -n1)"
@@ -84,26 +108,26 @@ jobs:
       - name: Deploy to Lambda
         run: |
           aws lambda update-function-code \
-            --function-name poco-pii-api-handler-dev \
+            --function-name ${{ steps.env.outputs.lambda }} \
             --zip-file fileb://target/lambda/poco-lambda/bootstrap.zip \
             --region us-east-1
           aws lambda wait function-updated \
-            --function-name poco-pii-api-handler-dev \
+            --function-name ${{ steps.env.outputs.lambda }} \
             --region us-east-1
 
-      - name: Test
+      - name: Smoke test
         run: |
-          URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/dev/health"
+          URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/${{ steps.env.outputs.name }}/health"
           echo "Testing $URL"
           for i in 1 2 3; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
             echo "Attempt $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
-              echo "✓ test passed"
+              echo "✓ Smoke test passed"
               curl -s "$URL"
               exit 0
             fi
             sleep 5
           done
-          echo "X test failed"
+          echo "✗ Smoke test failed"
           exit 1
