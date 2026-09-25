@@ -53,6 +53,10 @@ jobs:
         run: pip install cargo-lambda
 
       - name: Build Lambda
+        env:
+          # ort-sys (ONNX Runtime) needs the C++ standard library at link time.
+          CXXSTDLIB: stdc++
+          RUSTFLAGS: "-C link-arg=-lstdc++"
         run: cargo lambda build --release --arm64 -p poco-lambda
 
       - name: Deploy to Lambda
