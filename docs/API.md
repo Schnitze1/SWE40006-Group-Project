@@ -21,17 +21,18 @@ A **session** holds the encode/decode mapping for one document / chat turn.
 
 | Field | Type | Notes |
 |---|---|---|
-| `sessionId` | string | Client-generated UUID (or any opaque id). Required on every call. |
+| `sessionId` | string | Opaque id (UUID recommended). Optional on `/encode` — server generates one if omitted. Required on `/decode` and session routes. |
 | `token` | string | Readable token class, e.g. `Email_1`, `Iban_1`, `Date_2`. |
 | `value` | string | Original PII value. |
 | `category` | string | Detector class family: `Email`, `Name`, `Phone`, `Date`, `Location`, `Ssn`, `Iban`, `CreditCard`, `IpAddress`, … |
+| `firstOffset` | number | Byte offset of first occurrence in the source text (display sort key). |
 | `expiresAt` | number | Epoch seconds. DynamoDB TTL (24h / 86400s from write). |
 
-DynamoDB `pii-sessions`:
+DynamoDB `pii-sessions-{env}` (table name from `DYNAMODB_TABLE`):
 
 * Partition key: `sessionId` (S)
 * Sort key: `token` (S)
-* Attributes: `value` (S), `category` (S), `expiresAt` (N, TTL enabled)
+* Attributes: `value` (S), `category` (S), `firstOffset` (N), `expiresAt` (N, TTL enabled)
 
 Do **not** add extra session APIs without updating this doc.
 
@@ -44,7 +45,12 @@ Liveness. No auth, no body.
 **200**
 
 ```json
-{ "ok": true }
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "env": "dev",
+  "path": "/dev/health"
+}
 ```
 
 ---
@@ -64,7 +70,7 @@ Redact PII in free text and store mappings under `sessionId`.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `sessionId` | string | yes | Session id to store/merge mappings into. |
+| `sessionId` | string | no | Session id to store/merge mappings into. Omitted → server returns a new UUID. |
 | `text` | string | yes | Raw document text (not file upload in v1). |
 
 **200**
@@ -86,7 +92,8 @@ Redact PII in free text and store mappings under `sessionId`.
       "category": "Email",
       "firstOffset": 35
     }
-  ]
+  ],
+  "stats": { "totalEntities": 2, "durationMs": 12 }
 }
 ```
 
@@ -94,7 +101,7 @@ Redact PII in free text and store mappings under `sessionId`.
 * Same `sessionId` reuses tokens for the same value (session accumulation).
 * Website should render `redactedText` and show the mapping table in this order.
 
-**400** missing/invalid `sessionId` or `text`.
+**400** missing/invalid `text` (or non-empty invalid JSON).
 
 ---
 
