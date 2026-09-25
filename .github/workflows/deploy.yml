@@ -20,8 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pii-tool
@@ -31,17 +29,8 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: pii-tool
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: pii-tool
 
       - name: Determine environment
         id: env
@@ -61,6 +50,26 @@ jobs:
             exit 1
           fi
 
+      - name: Build inside Amazon Linux 2023
+        run: |
+          docker run --rm \
+            -v "$PWD":/work \
+            -w /work/pii-tool \
+            amazonlinux:2023 \
+            bash -c '
+              set -euo pipefail
+              dnf install -y gcc gcc-c++ make openssl-devel zip unzip curl
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              . "$HOME/.cargo/env"
+              cargo build --release -p poco-lambda
+              mkdir -p target/lambda/poco-lambda
+              cp target/release/poco-lambda target/lambda/poco-lambda/bootstrap
+              cd target/lambda/poco-lambda
+              zip -q bootstrap.zip bootstrap
+              echo "=== zip contents ==="
+              unzip -l bootstrap.zip
+            '
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -69,38 +78,11 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Install cargo-lambda
-        run: pip install cargo-lambda
-
-      - name: Build Lambda
-        run: |
-          set -euo pipefail
-          cargo lambda build --release \
-            --target x86_64-unknown-linux-gnu.2.34 \
-            -p poco-lambda \
-            --output-format zip
-          echo "=== artifact search ==="
-          find target -name "*.zip" -type f
-          ARTIFACT=$(find target -name "bootstrap.zip" -type f | head -n1)
-          echo "Found: $ARTIFACT"
-          unzip -l "$ARTIFACT"
-
-      - name: Locate artifact
-        id: artifact
-        run: |
-          ARTIFACT=$(find target -name "bootstrap.zip" -type f | head -n1)
-          if [ -z "$ARTIFACT" ]; then
-            echo "No bootstrap.zip found"
-            exit 1
-          fi
-          echo "path=$ARTIFACT" >> $GITHUB_OUTPUT
-
       - name: Deploy to Lambda
         run: |
-          set -euo pipefail
           aws lambda update-function-code \
             --function-name ${{ steps.env.outputs.lambda }} \
-            --zip-file fileb://${{ steps.artifact.outputs.path }} \
+            --zip-file fileb://pii-tool/target/lambda/poco-lambda/bootstrap.zip \
             --region us-east-1
           aws lambda wait function-updated \
             --function-name ${{ steps.env.outputs.lambda }} \
@@ -109,7 +91,6 @@ jobs:
       - name: Smoke test
         run: |
           URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/${{ steps.env.outputs.name }}/health"
-          echo "Testing $URL"
           for i in 1 2 3; do
             STATUS=$(curl -s -o /tmp/health_body -w "%{http_code}" "$URL" || true)
             echo "Attempt $i: HTTP $STATUS"
