@@ -57,10 +57,17 @@ jobs:
             -w /work/pii-tool \
             amazonlinux:2023 bash -c '
               set -euo pipefail
-              dnf install -y gcc gcc-c++ make zip unzip openssl-devel git
+              dnf install -y gcc gcc-c++ make zip unzip openssl-devel git cmake pkgconf perl ca-certificates findutils tar
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
               source "$HOME/.cargo/env"
-              cargo build --release -p poco-lambda
+              rustc --version
+              cargo --version
+              if ! cargo build --release -p poco-lambda > /tmp/cargo-build.log 2>&1; then
+                echo "=== cargo build failed, tail ==="
+                tail -n 80 /tmp/cargo-build.log
+                exit 1
+              fi
+              test -f target/release/poco-lambda
               mkdir -p target/lambda/poco-lambda
               cp target/release/poco-lambda target/lambda/poco-lambda/bootstrap
               chmod +x target/lambda/poco-lambda/bootstrap
