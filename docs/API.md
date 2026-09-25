@@ -1,14 +1,11 @@
-# PII Vault API (v1) — contract for the website client
+# PII Vault API (v1) 
 
-Audience: frontend / website teammate.  
 Runtime: AWS Lambda (Rust) behind API Gateway, **us-east-1**, AWS Academy Learner Lab.  
 Session store: DynamoDB table `pii-sessions` (LabRole — no custom IAM).
 
 All request/response bodies are JSON (`Content-Type: application/json`).  
 All timestamps are **Unix epoch seconds** (numbers).  
 Errors use HTTP status codes with a stable JSON body (see below).
-
-Base URL (set from your environment; smoke test uses `API_BASE_URL`):
 
 ```
 https://{api-id}.execute-api.us-east-1.amazonaws.com/{stage}
@@ -36,7 +33,7 @@ DynamoDB `pii-sessions`:
 * Sort key: `token` (S)
 * Attributes: `value` (S), `category` (S), `expiresAt` (N, TTL enabled)
 
-Do **not** invent extra session APIs without updating this doc.
+Do **not** add extra session APIs without updating this doc.
 
 ---
 

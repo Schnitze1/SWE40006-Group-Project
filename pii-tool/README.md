@@ -1,9 +1,12 @@
 # PII Anonymisation Tool POC
 
+Workspace for the Rust engine, CLI, and Lambda handler.  
+Project overview and deploy docs: **[../README.md](../README.md)** · **[../docs/ENVIRONMENTS.md](../docs/ENVIRONMENTS.md)** · **[../docs/API.md](../docs/API.md)**
 
 ## How to run
 
 ```bash
+cargo test --workspace
 cargo run -p pii-cli
 ```
 
