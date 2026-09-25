@@ -98,12 +98,33 @@ jobs:
         run: |
           set -euo pipefail
           cargo lambda build --release --arm64 -p poco-lambda
-          mkdir -p target/lambda/poco-lambda
-          if [ ! -f target/lambda/poco-lambda/bootstrap.zip ]; then
-            ZIP="$(find target/lambda -name '*.zip' | head -n1)"
-            cp "$ZIP" target/lambda/poco-lambda/bootstrap.zip
+          echo "=== target/lambda contents ==="
+          find target/lambda -type f 2>/dev/null | head -50 || true
+          BOOTDIR="target/lambda/poco-lambda"
+          mkdir -p "$BOOTDIR"
+          # cargo-lambda may emit bootstrap, bootstrap.zip, or <name>.zip
+          if [ -f "$BOOTDIR/bootstrap.zip" ]; then
+            echo "found $BOOTDIR/bootstrap.zip"
+          elif [ -f "$BOOTDIR/bootstrap" ]; then
+            (cd "$BOOTDIR" && zip -q bootstrap.zip bootstrap)
+            echo "zipped bootstrap binary"
+          else
+            ZIP="$(find target/lambda -name '*.zip' -type f 2>/dev/null | head -n1 || true)"
+            BIN="$(find target/lambda -type f -name 'bootstrap*' 2>/dev/null | head -n1 || true)"
+            if [ -n "$ZIP" ]; then
+              cp "$ZIP" "$BOOTDIR/bootstrap.zip"
+              echo "copied $ZIP"
+            elif [ -n "$BIN" ]; then
+              cp "$BIN" "$BOOTDIR/bootstrap"
+              (cd "$BOOTDIR" && zip -q bootstrap.zip bootstrap)
+              echo "packed $BIN"
+            else
+              echo "No bootstrap artifact under target/lambda"
+              find target -type f -name '*poco*' 2>/dev/null | head -50 || true
+              exit 1
+            fi
           fi
-          ls -la target/lambda/poco-lambda/
+          ls -la "$BOOTDIR"
 
       - name: Deploy to Lambda
         run: |
