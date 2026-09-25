@@ -58,16 +58,20 @@ pub fn route(method: &str, path: &str, body: &str) -> Response<String> {
         let empty = String::new();
         return json_response(200, empty);
     }
-    if method == "GET" && path == "/health" {
-        let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
-        let version = env!("CARGO_PKG_VERSION");
-        let payload = json!({
-            "status": "ok",
-            "version": version,
-            "env": env
-        });
-        let body = payload.to_string();
-        return json_response(200, body);
+    if method == "GET" {
+        let last = path.rsplit('/').next().unwrap_or("");
+        if last == "health" {
+            let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
+            let version = env!("CARGO_PKG_VERSION");
+            let payload = json!({
+                "status": "ok",
+                "version": version,
+                "env": env,
+                "path": path
+            });
+            let body = payload.to_string();
+            return json_response(200, body);
+        }
     }
     if method == "POST" && path == "/encode" {
         let started = Instant::now();
