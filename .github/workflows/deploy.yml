@@ -52,43 +52,33 @@ jobs:
 
       - name: Build Lambda in Amazon Linux 2023 container (glibc 2.34)
         run: |
+          set -euo pipefail
+          # Drop any stale artifacts (rust-cache / prior steps).
+          find pii-tool/target -name 'bootstrap.zip' -type f -delete 2>/dev/null || true
+          find pii-tool/target -name 'bootstrap' -type f -delete 2>/dev/null || true
           docker run --rm \
             -v "$PWD":/work \
             -w /work/pii-tool \
-            amazonlinux:2023 bash -c '
-              set -euo pipefail
-              dnf install -y gcc gcc-c++ make zip unzip openssl-devel git cmake pkgconf perl ca-certificates findutils tar
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-              source "$HOME/.cargo/env"
-              # ONNX Runtime (ort-sys) is prebuilt against glibc 2.38+; AL2023 is 2.34.
-              # Stub the C23 strtoll family so the prebuilt lib links.
-              cat > /tmp/glibc_compat.c << "CEOF"
-          #include <stdlib.h>
-          long long __isoc23_strtoll(const char *nptr, char **endptr, int base) { return strtoll(nptr, endptr, base); }
-          long __isoc23_strtol(const char *nptr, char **endptr, int base) { return strtol(nptr, endptr, base); }
-          unsigned long long __isoc23_strtoull(const char *nptr, char **endptr, int base) { return strtoull(nptr, endptr, base); }
-          unsigned long __isoc23_strtoul(const char *nptr, char **endptr, int base) { return strtoul(nptr, endptr, base); }
-          CEOF
-              cc -c /tmp/glibc_compat.c -o /tmp/glibc_compat.o
-              RUSTFLAGS="-C link-arg=/tmp/glibc_compat.o" cargo build --release -p poco-lambda
-              mkdir -p target/lambda/poco-lambda
-              cp target/release/poco-lambda target/lambda/poco-lambda/bootstrap
-              chmod +x target/lambda/poco-lambda/bootstrap
-              echo "=== binary ==="
-              file target/lambda/poco-lambda/bootstrap
-              ldd target/lambda/poco-lambda/bootstrap || true
-              (cd target/lambda/poco-lambda && zip -q bootstrap.zip bootstrap)
-              echo "=== zip ==="
-              unzip -l target/lambda/poco-lambda/bootstrap.zip
-            '
+            amazonlinux:2023 \
+            bash /work/pii-tool/crates/lambda/build_lambda.sh
 
       - name: Verify artifact
         run: |
-          echo "=== searching for bootstrap.zip ==="
-          find pii-tool/target -name "bootstrap.zip" -type f
-          ZIP=$(find pii-tool/target -name "bootstrap.zip" -type f | head -n1)
-          echo "Found: $ZIP"
+          set -euo pipefail
+          ZIP="pii-tool/target/lambda/poco-lambda/bootstrap.zip"
+          echo "ZIP=$ZIP"
+          ls -la "$ZIP"
           unzip -l "$ZIP"
+          TMP=$(mktemp -d)
+          unzip -q -o "$ZIP" -d "$TMP"
+          echo "=== binary in zip ==="
+          file "$TMP/bootstrap"
+          if objdump -T "$TMP/bootstrap" | grep -q GLIBC_2.38; then
+            echo "ERROR: zip binary still requires GLIBC_2.38"
+            objdump -T "$TMP/bootstrap" | grep GLIBC_2.38
+            exit 1
+          fi
+          echo "OK: no GLIBC_2.38 requirement"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -103,10 +93,10 @@ jobs:
           set -euo pipefail
           echo "=== caller identity ==="
           aws sts get-caller-identity || true
-          ZIP=$(find pii-tool/target -name "bootstrap.zip" -type f | head -n1)
+          ZIP="pii-tool/target/lambda/poco-lambda/bootstrap.zip"
           echo "ZIP=$ZIP"
-          if [ -z "$ZIP" ]; then
-            echo "ERROR: bootstrap.zip not found"
+          if [ ! -f "$ZIP" ]; then
+            echo "ERROR: bootstrap.zip not found at $ZIP"
             find pii-tool/target -type f | head -50
             exit 1
           fi
