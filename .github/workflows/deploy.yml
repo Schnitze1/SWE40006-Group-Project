@@ -1,16 +1,20 @@
-# AWS Academy Learner Lab deployment
+# AWS Academy Learner Lab deployment — routes by branch to dev/test/staging/prod.
 #
 # Hard constraints (do not "fix" by adding IAM/OIDC):
 #   * Region is locked to us-east-1 (hardcoded — do not parameterise).
 #   * No IAM role creation, no OIDC providers. Runtime uses the pre-existing LabRole.
 #   * GitHub Actions auth uses static credentials in GitHub secrets only.
-#   * Deploy is update-function-code / S3 sync / CloudFront invalidation only.
+#   * Deploy is update-function-code only.
 
 name: Deploy
 
 on:
   push:
-    branches: [develop]
+    branches:
+      - develop
+      - 'test/**'
+      - 'release/**'
+      - main
   workflow_dispatch:
 
 permissions:
@@ -25,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pii-tool
@@ -40,9 +46,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pii-tool
+
+      - name: Determine environment
+        id: env
+        run: |
+          REF="${{ github.ref }}"
+          if [[ "$REF" == "refs/heads/develop" ]]; then
+            echo "name=dev" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler-dev" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == refs/heads/test/* ]]; then
+            echo "name=test" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler-test" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == refs/heads/release/* ]]; then
+            echo "name=staging" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler-staging" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == "refs/heads/main" ]]; then
+            echo "name=prod" >> $GITHUB_OUTPUT
+            echo "lambda=poco-pii-api-handler" >> $GITHUB_OUTPUT
+          else
+            echo "Unknown branch: $REF"
+            exit 1
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -52,47 +81,114 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Install cargo-lambda
-        run: pip install cargo-lambda
-
       - name: Install aarch64 GNU toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y g++-aarch64-linux-gnu
 
+      - name: Install cargo-lambda
+        run: pip install cargo-lambda
+
       - name: Build Lambda
         env:
-          # Build with the GNU cross-toolchain so ort-sys links against a full
-          # aarch64 libstdc++ implementation.
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-g++
           CXXSTDLIB: stdc++
-        run: cargo lambda build --release --target aarch64-unknown-linux-gnu.2.34 -p poco-lambda
+          RUSTFLAGS: "-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          # glibc 2.34 = Amazon Linux 2023 (host runner is 2.39; must not link host glibc)
+          cargo lambda build --release --target aarch64-unknown-linux-gnu.2.34 -p poco-lambda
+          echo "=== target/lambda contents ==="
+          find target/lambda -type f 2>/dev/null | head -80 || true
+          BOOTDIR="target/lambda/poco-lambda"
+          mkdir -p "$BOOTDIR"
+          if [ ! -f "$BOOTDIR/bootstrap" ]; then
+            # --target gnu.2.34 may nest the output; find bootstrap or zip anywhere.
+            ZIP="$(find target/lambda -name '*.zip' -type f 2>/dev/null | head -n1 || true)"
+            BIN="$(find target/lambda -type f -name 'bootstrap' 2>/dev/null | head -n1 || true)"
+            if [ -z "$BIN" ]; then
+              BIN="$(find target/lambda -type f -name 'poco-lambda' 2>/dev/null | head -n1 || true)"
+            fi
+            if [ -n "$BIN" ]; then
+              cp "$BIN" "$BOOTDIR/bootstrap"
+            elif [ -n "$ZIP" ]; then
+              unzip -o "$ZIP" -d "$BOOTDIR"
+              if [ ! -f "$BOOTDIR/bootstrap" ]; then
+                BOOTBIN="$(find "$BOOTDIR" -type f | head -n1)"
+                mv "$BOOTBIN" "$BOOTDIR/bootstrap"
+              fi
+            else
+              echo "No bootstrap artifact under target/lambda"
+              find target -type f \( -name 'bootstrap*' -o -name 'poco-lambda*' -o -name '*.zip' \) 2>/dev/null | head -50 || true
+              exit 1
+            fi
+          fi
+          chmod +x "$BOOTDIR/bootstrap"
+          echo "=== bootstrap binary ==="
+          file "$BOOTDIR/bootstrap"
+          echo "=== NEEDED shared libs ==="
+          aarch64-linux-gnu-readelf -d "$BOOTDIR/bootstrap" | grep NEEDED || true
+          SYSROOT_LIB="/usr/aarch64-linux-gnu/lib"
+          aarch64-linux-gnu-readelf -d "$BOOTDIR/bootstrap" 2>/dev/null \
+            | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' \
+            | while read -r so; do
+                case "$so" in
+                  libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|ld-linux-*)
+                    echo "skip system lib $so"
+                    ;;
+                  *)
+                    for dir in "$SYSROOT_LIB" /usr/aarch64-linux-gnu/lib64 /usr/lib/aarch64-linux-gnu; do
+                      if [ -e "$dir/$so" ]; then
+                        echo "bundling $dir/$so"
+                        cp -L "$dir/$so" "$BOOTDIR/"
+                        break
+                      fi
+                    done
+                    ;;
+                esac
+              done
+          find target "$HOME/.cargo" -iname 'libonnxruntime*' 2>/dev/null | head -20 | while read -r p; do
+            echo "bundling $p"
+            cp -L "$p" "$BOOTDIR/" || true
+          done
+          (cd "$BOOTDIR" && zip -q -r bootstrap.zip . -x bootstrap.zip)
+          echo "=== zip contents ==="
+          unzip -l "$BOOTDIR/bootstrap.zip"
+          ls -la "$BOOTDIR"
 
       - name: Deploy to Lambda
         run: |
+          set -euo pipefail
           aws lambda update-function-code \
-            --function-name poco-pii-api-handler-dev \
+            --function-name ${{ steps.env.outputs.lambda }} \
             --zip-file fileb://target/lambda/poco-lambda/bootstrap.zip \
             --region us-east-1
           aws lambda wait function-updated \
-            --function-name poco-pii-api-handler-dev \
+            --function-name ${{ steps.env.outputs.lambda }} \
             --region us-east-1
+          echo "=== function configuration ==="
+          aws lambda get-function-configuration \
+            --function-name ${{ steps.env.outputs.lambda }} \
+            --region us-east-1 \
+            --query '{Runtime:Runtime,Architectures:Architectures,Handler:Handler,State:State,LastUpdateStatus:LastUpdateStatus}' \
+            --output json
 
-      - name: Test
+      - name: Smoke test
         run: |
-          URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/dev/health"
+          URL="https://6xz841x652.execute-api.us-east-1.amazonaws.com/${{ steps.env.outputs.name }}/health"
           echo "Testing $URL"
           for i in 1 2 3; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+            STATUS=$(curl -s -o /tmp/health_body -w "%{http_code}" "$URL" || true)
             echo "Attempt $i: HTTP $STATUS"
+            echo "body: $(cat /tmp/health_body 2>/dev/null || true)"
             if [ "$STATUS" = "200" ]; then
-              echo "✓ test passed"
-              curl -s "$URL"
+              echo "✓ Smoke test passed"
               exit 0
             fi
             sleep 5
           done
-          echo "X test failed"
+          echo "✗ Smoke test failed"
           exit 1
