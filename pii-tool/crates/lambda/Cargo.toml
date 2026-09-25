@@ -1,0 +1,16 @@
+[package]
+name = "poco-lambda"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "poco-lambda"
+path = "src/main.rs"
+
+[dependencies]
+lambda_http = "0.14"
+tokio = { version = "1", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+poco-core = { path = "../core", package = "pii-core" }

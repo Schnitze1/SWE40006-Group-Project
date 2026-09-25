@@ -14,6 +14,8 @@ pub struct TokenMapping {
     pub token: String,
     pub value: String,
     pub class: String,
+    /// Byte offset of the value's first occurrence in the source text (display sort key).
+    pub first_offset: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -54,10 +56,87 @@ fn is_session_token_inner(inner: &str) -> bool {
     !hex.is_empty()
         && hex.chars().all(|c| c.is_ascii_hexdigit())
         && class.contains('_')
+        // ANYTHING after the session hex: letters, digits, colons, hyphens, underscores.
         && class
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '-')
         && class.chars().last().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Last `_N` segment after the final `:` or `-`, first letter capitalised.
+/// `Email_4` → `Email_4`; `Custom:date_1` → `Date_1`;
+/// `Custom:family:payment-card-or-iban_1` → `Iban_1`.
+fn readable_class(raw_class: &str) -> String {
+    let last = raw_class
+        .rsplit([':', '-'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(raw_class);
+    let mut chars = last.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => raw_class.to_string(),
+    }
+}
+
+/// Turn a full gaze token (or raw class) into the readable `[Iban_1]` form.
+pub fn readable_token(token_or_class: &str) -> String {
+    let mut inner = token_or_class.trim();
+    while inner.starts_with('<') {
+        inner = &inner[1..];
+    }
+    while inner.ends_with('>') {
+        inner = &inner[..inner.len() - 1];
+    }
+    let class = match inner.find(':') {
+        Some(i) => &inner[i + 1..],
+        None => inner,
+    };
+    format!("[{}]", readable_class(class))
+}
+
+/// Attach a trailing `/prefix` (CIDR) to the preceding IP token so nothing dangles.
+fn absorb_cidr_suffix(text: &str, mappings: &mut [TokenMapping]) -> String {
+    let capacity = text.len();
+    let mut out = String::with_capacity(capacity);
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            if let Some(close) = text[i..].find(']') {
+                let close_abs = i + close;
+                let token = &text[i..=close_abs];
+                let class = &text[i + 1..close_abs];
+                let end = close_abs + 1;
+                // `/24` immediately after the token?
+                if end < bytes.len() && bytes[end] == b'/' {
+                    let mut p = end + 1;
+                    while p < bytes.len() && bytes[p].is_ascii_digit() {
+                        p += 1;
+                    }
+                    if p > end + 1 {
+                        let prefix = &text[end..p]; // "/24"
+                        if let Some(m) = mappings
+                            .iter_mut()
+                            .find(|m| format!("[{}]", m.class) == token)
+                        {
+                            m.value.push_str(prefix);
+                        }
+                        out.push_str(token);
+                        i = p;
+                        continue;
+                    }
+                }
+                out.push_str(token);
+                let _ = class;
+                i = end;
+                continue;
+            }
+        }
+        let ch_len = text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
 }
 
 /// Strip a leading name title so "Dr. Sarah Mitchell" and "Sarah Mitchell" link.
@@ -72,6 +151,254 @@ fn person_core_name(value: &str) -> &str {
         }
     }
     value
+}
+
+/// Org / company names — never treat "Microsoft Corporation" / "BHP Group Limited" as PII names.
+fn is_org_like_name(value: &str) -> bool {
+    const ORG_LAST: [&str; 10] = [
+        "Corporation",
+        "Corp",
+        "Corp.",
+        "Inc",
+        "Inc.",
+        "Ltd",
+        "Ltd.",
+        "Limited",
+        "Group",
+        "LLC",
+    ];
+    const ORG_WORDS: [&str; 8] = [
+        "Corporation",
+        "Corp",
+        "Inc",
+        "Ltd",
+        "Limited",
+        "Group",
+        "LLC",
+        "Company",
+    ];
+    let words: Vec<&str> = value.split_whitespace().collect();
+    if words.len() < 2 {
+        return false;
+    }
+    if let Some(last) = words.last() {
+        if ORG_LAST.contains(last) {
+            return true;
+        }
+    }
+    words.iter().any(|w| {
+        let bare = w.trim_end_matches(['.', ',']);
+        ORG_WORDS.contains(&bare)
+    })
+}
+
+/// Numeric suffix of `Name_2` / `Email_10` — lower wins when collapsing variants.
+fn token_counter(class: &str) -> u32 {
+    class
+        .rsplit('_')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
+}
+
+fn is_name_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '-' || c == '_'
+}
+
+fn is_name_part(s: &str) -> bool {
+    s.len() >= 3
+        && s.chars()
+            .all(|c| c.is_alphabetic() || c == '\'' || c == '-')
+}
+
+/// True when `pos` sits inside an existing `[Token]` (already redacted).
+fn inside_token(text: &str, pos: usize) -> bool {
+    let before = &text[..pos];
+    let open = before.rfind('[');
+    let close = before.rfind(']');
+    match (open, close) {
+        (Some(o), Some(c)) => o > c,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// If a name title sits immediately before `name_start`, return the title start.
+fn extend_title_start(text: &str, name_start: usize) -> usize {
+    const TITLES: [&str; 12] = [
+        "Prof.", "Prof", "Dr.", "Dr", "Mr.", "Mr", "Mrs.", "Mrs", "Ms.", "Ms", "Mx.", "Mx",
+    ];
+    let before = &text[..name_start];
+    let trimmed = before.trim_end();
+    for title in TITLES {
+        if let Some(rest) = trimmed.strip_suffix(title) {
+            let boundary_ok = rest
+                .chars()
+                .next_back()
+                .map(|c| !is_name_word_char(c))
+                .unwrap_or(true);
+            if boundary_ok {
+                return rest.len();
+            }
+        }
+    }
+    name_start
+}
+
+/// Replace whole-word `needle` with `token`. Optionally include a preceding title.
+fn replace_whole_words(text: &str, needle: &str, token: &str, allow_title: bool) -> String {
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut search = 0;
+    while search < text.len() {
+        let Some(rel) = text[search..].find(needle) else {
+            break;
+        };
+        let start = search + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(is_name_word_char);
+        let after_ok = end >= text.len()
+            || !text[end..].chars().next().is_some_and(is_name_word_char);
+        if before_ok && after_ok && !inside_token(text, start) {
+            let mut repl_start = start;
+            if allow_title {
+                repl_start = extend_title_start(text, start);
+            }
+            spans.push((repl_start, end));
+        }
+        search = end;
+    }
+    let mut out = text.to_string();
+    for (start, end) in spans.into_iter().rev() {
+        out.replace_range(start..end, token);
+    }
+    out
+}
+
+/// Redact bare first/last names that match an already-tokenised PERSON mapping.
+/// Case-sensitive whole words only; never touches text inside `[...]`.
+fn expand_known_person_names(text: &str, mappings: &[TokenMapping]) -> String {
+    let mut out = text.to_string();
+    for m in mappings {
+        let is_name = m.class.contains("Name") || m.class.contains("name");
+        if !is_name {
+            continue;
+        }
+        let token = format!("[{}]", m.class);
+        let core = person_core_name(&m.value);
+        let mut parts = core.split_whitespace();
+        let raw_first = parts.next().unwrap_or("");
+        let first = raw_first.trim_matches(|c: char| !is_name_word_char(c));
+        if is_name_part(first) {
+            out = replace_whole_words(&out, first, &token, false);
+        }
+        let mut last = "";
+        for part in core.split_whitespace() {
+            last = part;
+        }
+        let last = last.trim_matches(|c: char| !is_name_word_char(c));
+        if is_name_part(last) && last != first {
+            out = replace_whole_words(&out, last, &token, true);
+        }
+    }
+    out
+}
+
+/// Class family prefix before the `_<N>` counter (e.g. `Name_3` → `Name`).
+fn class_family(class: &str) -> &str {
+    match class.rfind('_') {
+        Some(i) => &class[..i],
+        None => class,
+    }
+}
+
+/// Stable sort key so IP hosts number by address (10.0.14.22 before 10.0.14.23)
+/// even when PDF extract reorders lines. Other families use first_offset.
+fn renumber_sort_key(m: &TokenMapping) -> (u8, String, String, usize) {
+    let family = class_family(&m.class);
+    let family_l = family.to_lowercase();
+    if family_l.contains("ip") {
+        // Numeric IPv4 first (last octets), then CIDR, then IPv6 / other.
+        let v = m.value.trim();
+        if let Some(key) = ipv4_sort_key(v) {
+            return (0, key, String::new(), m.first_offset);
+        }
+        return (1, String::new(), v.to_string(), m.first_offset);
+    }
+    let _ = family;
+    (2, String::new(), String::new(), m.first_offset)
+}
+
+fn ipv4_sort_key(value: &str) -> Option<String> {
+    let host = value.split('/').next().unwrap_or("");
+    let mut parts = host.split('.');
+    let a = parts.next()?.parse::<u32>().ok()?;
+    let b = parts.next()?.parse::<u32>().ok()?;
+    let c = parts.next()?.parse::<u32>().ok()?;
+    let d = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{a:03}.{b:03}.{c:03}.{d:03}"))
+}
+
+/// Reassign `Class_N` so N is unique per family and stable (offset / IP value).
+/// Uses a two-phase rename via unique placeholders so swaps cannot clobber.
+fn renumber_tokens_by_first_offset(mappings: &mut [TokenMapping], text: &mut String) {
+    let mut order: Vec<usize> = (0..mappings.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ka = renumber_sort_key(&mappings[a]);
+        let kb = renumber_sort_key(&mappings[b]);
+        ka.cmp(&kb)
+    });
+
+    let mut counters: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut updates: Vec<(usize, String)> = Vec::new();
+
+    for idx in order {
+        let m = &mappings[idx];
+        let family = class_family(&m.class).to_string();
+        let family_key = family.clone();
+        let entry = counters.entry(family_key).or_insert(0);
+        *entry += 1;
+        let n = *entry;
+        let new_class = format!("{family}_{n}");
+        if new_class != m.class {
+            let old = m.class.clone();
+            renames.push((old, new_class.clone()));
+        }
+        updates.push((idx, new_class));
+    }
+
+    // Phase 1: old → unique placeholder (longest old first so Name_10 ≠ Name_1).
+    renames.sort_by(|a, b| {
+        let left = b.0.len();
+        let right = a.0.len();
+        left.cmp(&right)
+    });
+    let mut staged: Vec<(String, String)> = Vec::new(); // (placeholder, new)
+    for (i, (old, new)) in renames.iter().enumerate() {
+        let placeholder = format!("\u{E000}TOK{i}\u{E001}");
+        let from = format!("[{old}]");
+        *text = text.replace(&from, &placeholder);
+        let ph = placeholder.clone();
+        staged.push((ph, new.clone()));
+    }
+    // Phase 2: placeholder → new.
+    for (placeholder, new) in &staged {
+        let to = format!("[{new}]");
+        *text = text.replace(placeholder, &to);
+    }
+    for (idx, new_class) in updates {
+        mappings[idx].class = new_class;
+    }
 }
 
 /// Find the next gaze token at or after `from`.
@@ -152,14 +479,14 @@ impl Vault {
             return Err(VaultError::Pipeline("Expected Text document".into()));
         };
 
-        let mut mappings = Vec::new();
+        let mut mappings: Vec<TokenMapping> = Vec::new();
         let mut readable_redacted_text = clean_text.clone();
 
         // Gaze emits <session_hex:Class_N>. When the source span was already wrapped
         // in <angle brackets>, the redacted form is <<session_hex:Class_N>>.
         let mut cursor = 0;
         while let Some(tok) = next_gaze_token(&clean_text, cursor) {
-            let class_name = tok.class.clone();
+            let class_name = readable_class(&tok.class);
             let readable_token = format!("[{}]", class_name);
 
             let original_value = self
@@ -169,11 +496,20 @@ impl Vault {
                 .map(|v| v.to_string());
 
             if let Some(original_value) = original_value {
-                if !mappings.iter().any(|m: &TokenMapping| m.token == tok.session_key) {
+                let first_offset = text.find(&original_value).unwrap_or(usize::MAX);
+                if let Some(existing) = mappings
+                    .iter_mut()
+                    .find(|m| m.token == tok.session_key)
+                {
+                    if first_offset < existing.first_offset {
+                        existing.first_offset = first_offset;
+                    }
+                } else {
                     mappings.push(TokenMapping {
                         token: tok.session_key.clone(),
                         value: original_value,
                         class: class_name,
+                        first_offset,
                     });
                 }
                 readable_redacted_text = readable_redacted_text.replace(&tok.raw, &readable_token);
@@ -194,7 +530,8 @@ impl Vault {
         let mut value_to_class: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for m in &mappings {
-            let entry = value_to_class.entry(m.value.clone()).or_insert_with(|| m.class.clone());
+            let value_key = m.value.clone();
+            let entry = value_to_class.entry(value_key).or_insert_with(|| m.class.clone());
             if *entry != m.class {
                 let from = format!("[{}]", m.class);
                 let to = format!("[{entry}]");
@@ -207,11 +544,17 @@ impl Vault {
                 .get(&m.value)
                 .cloned()
                 .unwrap_or_else(|| m.class.clone());
-            if !deduped.iter().any(|d| d.value == m.value) {
+            if let Some(existing) = deduped.iter_mut().find(|d| d.value == m.value) {
+                if m.first_offset < existing.first_offset {
+                    existing.first_offset = m.first_offset;
+                }
+                existing.class = canonical;
+            } else {
                 deduped.push(TokenMapping {
                     token: m.token,
                     value: m.value,
                     class: canonical,
+                    first_offset: m.first_offset,
                 });
             }
         }
@@ -234,12 +577,116 @@ impl Vault {
             }
         }
 
+        // Collapse titled / bare / case variants of one person onto a single token
+        // (Mask shared-label behaviour: "Dr. Priya Nair" and "Priya Nair" are one entity).
+        let mut core_to_class: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for m in &deduped {
+            let is_name = m.class.contains("Name") || m.class.contains("name");
+            if !is_name {
+                continue;
+            }
+            let core = person_core_name(&m.value).to_lowercase();
+            if core.is_empty() {
+                continue;
+            }
+            match core_to_class.get(&core) {
+                None => {
+                    let class_name = m.class.clone();
+                    core_to_class.insert(core, class_name);
+                }
+                Some(existing) => {
+                    // Prefer the earliest session counter (Name_1 beats Name_2) so
+                    // cross-document variants keep the first-seen token.
+                    let incoming = token_counter(&m.class);
+                    let current = token_counter(existing);
+                    if incoming < current {
+                        let class_name = m.class.clone();
+                        core_to_class.insert(core, class_name);
+                    }
+                }
+            }
+        }
+        for m in &deduped {
+            let is_name = m.class.contains("Name") || m.class.contains("name");
+            if !is_name {
+                continue;
+            }
+            let core = person_core_name(&m.value).to_lowercase();
+            let Some(canonical) = core_to_class.get(&core) else {
+                continue;
+            };
+            if *canonical == m.class {
+                continue;
+            }
+            let from = format!("[{}]", m.class);
+            let to = format!("[{canonical}]");
+            readable_redacted_text = readable_redacted_text.replace(&from, &to);
+        }
+        let mut collapsed: Vec<TokenMapping> = Vec::new();
+        for m in deduped {
+            let is_name = m.class.contains("Name") || m.class.contains("name");
+            let canonical = if is_name {
+                let core = person_core_name(&m.value).to_lowercase();
+                core_to_class
+                    .get(&core)
+                    .cloned()
+                    .unwrap_or_else(|| m.class.clone())
+            } else {
+                m.class.clone()
+            };
+            if let Some(existing) = collapsed.iter_mut().find(|d| {
+                d.class == canonical
+                    && person_core_name(&d.value).to_lowercase()
+                        == person_core_name(&m.value).to_lowercase()
+            }) {
+                if m.first_offset < existing.first_offset {
+                    existing.first_offset = m.first_offset;
+                }
+            } else {
+                collapsed.push(TokenMapping {
+                    token: m.token,
+                    value: m.value,
+                    class: canonical,
+                    first_offset: m.first_offset,
+                });
+            }
+        }
+        // Reject org/company false positives ("Microsoft Corporation").
+        let mut kept: Vec<TokenMapping> = Vec::new();
+        for m in collapsed {
+            let is_name = m.class.contains("Name") || m.class.contains("name") || m.class.contains("Location");
+            if is_org_like_name(&m.value) {
+                let token = format!("[{}]", m.class);
+                readable_redacted_text = readable_redacted_text.replace(&token, &m.value);
+                continue;
+            }
+            let _ = is_name;
+            kept.push(m);
+        }
+        let mut deduped = kept;
+
         // Strip any surrounding < > left after replacing wrapped tokens (e.g. `<[Email_1]>`).
         readable_redacted_text = readable_redacted_text
             .replace("<<[", "[")
             .replace("]>>", "]")
             .replace("<[", "[")
             .replace("]>", "]");
+
+        // CIDR: pull a dangling `/prefix` into the IP mapping so 10.0.14.0/24 is one token.
+        // (core ip.v4 may win the span and leave `/24` behind.)
+        readable_redacted_text = absorb_cidr_suffix(&readable_redacted_text, &mut deduped);
+
+        // CHANGE 2: display order follows first appearance in the source text.
+        deduped.sort_by_key(|m| m.first_offset);
+
+        // Session-known-name lookup: bare first/last names that match an existing
+        // PERSON mapping (e.g. "Priya" after "Priya Patel") reuse that token.
+        readable_redacted_text = expand_known_person_names(&readable_redacted_text, &deduped);
+
+        // Keep Class_N counters aligned with first_offset inside each family
+        // (Name_1 is always the earliest name in the source, …).
+        renumber_tokens_by_first_offset(&mut deduped, &mut readable_redacted_text);
 
         Ok(EncodedOutput {
             redacted_text: readable_redacted_text,
@@ -280,10 +727,14 @@ impl Vault {
                                 .unwrap_or_else(|| mapping.value.clone());
 
                             if !replacements.iter().any(|(t, _)| t == readable_token) {
-                                replacements.push((readable_token.to_string(), original_value));
+                                let token_text = readable_token.to_string();
+                                replacements.push((token_text, original_value));
                             }
-                        } else if !hallucinations.contains(&readable_token.to_string()) {
-                            hallucinations.push(readable_token.to_string());
+                        } else {
+                            let token_text = readable_token.to_string();
+                            if !hallucinations.contains(&token_text) {
+                                hallucinations.push(token_text);
+                            }
                         }
                     }
 
@@ -297,7 +748,11 @@ impl Vault {
         }
 
         // Replace longer tokens first so [Email_10] is not clobbered by [Email_1].
-        replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        replacements.sort_by(|a, b| {
+            let left = b.0.len();
+            let right = a.0.len();
+            left.cmp(&right)
+        });
         let mut restored_text = llm_response.to_string();
         for (token, value) in replacements {
             restored_text = restored_text.replace(&token, &value);
@@ -347,6 +802,7 @@ Note that version 1.2.3 of the API and the product code ABC-1234 should remain u
             token: format!("<test:{}>", class),
             value: value.to_string(),
             class: class.to_string(),
+            first_offset: 0,
         }
     }
 
@@ -1144,5 +1600,309 @@ internal tracking code ABC-1234 and portal version 1.2.3
                 );
             }
         }
+    }
+
+    // ---------- CHANGE 1 — session prefix / complex family tokens ----------
+
+    #[test]
+    fn change1_family_iban_token_becomes_readable() {
+        assert_eq!(
+            readable_token("<680311de:Custom:family:payment-card-or-iban_1>"),
+            "[Iban_1]"
+        );
+    }
+
+    #[test]
+    fn change1_simple_email_token_unchanged() {
+        assert_eq!(readable_token("<422c7695:Email_4>"), "[Email_4]");
+    }
+
+    #[test]
+    fn change1_custom_date_token_capitalises() {
+        assert_eq!(readable_token("<422c7695:Custom:date_1>"), "[Date_1]");
+    }
+
+    // ---------- Split identity / financial class names ----------
+
+    #[test]
+    fn readable_class_split_identity_and_financial() {
+        assert_eq!(readable_class("custom:passport"), "Passport");
+        assert_eq!(readable_class("custom:tfn"), "Tfn");
+        assert_eq!(readable_class("custom:medicare"), "Medicare");
+        assert_eq!(readable_class("custom:dln"), "Dln");
+        assert_eq!(readable_class("custom:employee"), "Employee");
+        assert_eq!(readable_class("custom:ssn"), "Ssn");
+        assert_eq!(readable_class("custom:swift"), "Swift");
+        assert_eq!(readable_class("custom:payroll"), "Payroll");
+        assert_eq!(readable_class("custom:iban"), "Iban");
+    }
+
+    // ---------- CHANGE 2 — mapping display order by first appearance ----------
+
+    // ---------- Session-known-name lookup (bare first / last) ----------
+
+    #[test]
+    fn session_name_expands_bare_first_name() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Hiring manager: Priya Patel. Priya will review.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Hiring manager: [Name_1]. [Name_1] will review.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_expands_bare_first_name_emergency() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Emergency contact: Michael Chen. Michael is the spouse.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Emergency contact: [Name_1]. [Name_1] is the spouse.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_expands_title_plus_surname() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Contact Dr. Sarah Mitchell. Dr. Mitchell will confirm.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Contact [Name_1]. [Name_1] will confirm.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_whole_word_no_substring() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Contact Dr. Sarah Mitchell. The Mitchella plant grows here.")
+            .unwrap();
+        assert_eq!(
+            encoded.redacted_text,
+            "Contact [Name_1]. The Mitchella plant grows here.",
+            "mappings {:?}",
+            encoded.mappings
+        );
+    }
+
+    #[test]
+    fn session_name_skips_short_first_names() {
+        let vault = Vault::new().unwrap();
+        // "Ed Li" — first name too short to expand; must not wipe "Ed" elsewhere.
+        let encoded = vault
+            .encode("Hiring manager: Dr. Edward Li. Ed will review.")
+            .unwrap();
+        assert!(
+            encoded.redacted_text.contains("Ed will review"),
+            "short/ambiguous given name must not be expanded: {}",
+            encoded.redacted_text
+        );
+    }
+
+    // ---------- token order follows first_offset ----------
+
+    #[test]
+    fn mappings_sorted_by_first_offset() {
+        let path = format!("{}/../../sample.txt", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let vault = Vault::new().unwrap();
+        let encoded = vault.encode(&text).unwrap();
+        let mut prev = 0usize;
+        for m in &encoded.mappings {
+            assert!(
+                m.first_offset >= prev,
+                "mappings not sorted by first_offset: {:?} after offset {}",
+                m,
+                prev
+            );
+            prev = m.first_offset;
+        }
+    }
+
+    #[test]
+    fn name_token_numbers_follow_first_offset() {
+        let path = format!("{}/../../sample.txt", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let vault = Vault::new().unwrap();
+        let encoded = vault.encode(&text).unwrap();
+        let names: Vec<&TokenMapping> = encoded
+            .mappings
+            .iter()
+            .filter(|m| m.class.contains("Name"))
+            .collect();
+        assert!(names.len() >= 2, "need multiple names: {:?}", names);
+        for pair in names.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let na = token_counter(&a.class);
+            let nb = token_counter(&b.class);
+            assert!(
+                na < nb,
+                "Name token numbers must increase with first_offset: {:?} ({} @ {}) then {:?} ({} @ {})",
+                a.value,
+                a.class,
+                a.first_offset,
+                b.value,
+                b.class,
+                b.first_offset
+            );
+        }
+    }
+
+    #[test]
+    fn section5_person_token_before_section6_occupation() {
+        // 张伟 (handwritten note) appears before "Sarah Mitchell — Senior …".
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode(
+                "Please CC 张伟 (zhang.wei@example.cn).\n\
+                 Occupations:\n  - Sarah Mitchell — Senior Software Engineer\n",
+            )
+            .unwrap();
+        let zhang = encoded
+            .mappings
+            .iter()
+            .find(|m| m.value.contains("张伟"))
+            .expect("张伟 mapping");
+        let sarah = encoded
+            .mappings
+            .iter()
+            .find(|m| m.value.contains("Sarah Mitchell"))
+            .expect("Sarah mapping");
+        let nz = token_counter(&zhang.class);
+        let ns = token_counter(&sarah.class);
+        assert!(
+            zhang.first_offset < sarah.first_offset,
+            "fixture order: {:?}",
+            encoded.mappings
+        );
+        assert!(
+            nz < ns,
+            "section-5 person must get a lower Name_N than section-6 occupation: {} vs {}",
+            zhang.class,
+            sarah.class
+        );
+    }
+
+    #[test]
+    fn change2_mappings_sorted_by_first_appearance_in_source() {
+        let vault = Vault::new().unwrap();
+        // Email appears after the phone number in the source.
+        let input = "Call (555) 867-5309 then email zoe.last@example.com.";
+        let encoded = vault.encode(input).unwrap();
+
+        assert!(
+            encoded.mappings.len() >= 2,
+            "need ≥2 mappings: {:?}",
+            encoded.mappings
+        );
+        let phone_idx = input.find("5309").unwrap();
+        let email_idx = input.find("zoe.last@example.com").unwrap();
+        let phone_pos = encoded
+            .mappings
+            .iter()
+            .position(|m| m.value.contains("5309"))
+            .expect("phone mapping");
+        let email_pos = encoded
+            .mappings
+            .iter()
+            .position(|m| m.value.contains("zoe.last@example.com"))
+            .expect("email mapping");
+
+        assert!(
+            phone_pos < email_pos,
+            "mappings must follow source order (phone@{phone_idx} before email@{email_idx}): {:?}",
+            encoded.mappings
+        );
+        assert!(
+            encoded.mappings[phone_pos].first_offset <= encoded.mappings[email_pos].first_offset
+        );
+    }
+
+    #[test]
+    fn change2_mapping_sort_is_display_order_only() {
+        let vault = Vault::new().unwrap();
+        let input = "Call (555) 867-5309 then email zoe.last@example.com.";
+        let encoded = vault.encode(input).unwrap();
+        let decoded = vault
+            .decode(&encoded.redacted_text, &encoded.mappings)
+            .unwrap();
+        assert_eq!(decoded.restored_text, input);
+    }
+
+    /// DD Mon YYYY / DD Month YYYY (passport, contract, travel dates).
+    #[test]
+    fn date_mon_year_formats_are_detected() {
+        let vault = Vault::new().unwrap();
+        for date in [
+            "12 Nov 2031",
+            "22 Sept 2026",
+            "12 Oct 2026",
+            "24 September 2026",
+            "1 Jan 2020",
+        ] {
+            let encoded = vault.encode(format!("Expires {date}.").as_str()).unwrap();
+            assert!(
+                encoded.mappings.iter().any(|m| m.value.contains(date)
+                    && m.class.to_lowercase().contains("date")),
+                "date {date:?} not detected: {:?}",
+                encoded.mappings
+            );
+            assert!(
+                !encoded.redacted_text.contains(date),
+                "date {date:?} leaked: {}",
+                encoded.redacted_text
+            );
+        }
+    }
+
+    /// IPv4 CIDR must be one token — no dangling `/24`.
+    #[test]
+    fn cidr_ipv4_is_one_token_no_dangling_prefix() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault.encode("Subnet: 10.0.14.0/24").unwrap();
+
+        assert!(
+            encoded
+                .mappings
+                .iter()
+                .any(|m| m.value.contains("10.0.14.0/24") || m.value.contains("10.0.14.0")),
+            "cidr not detected: {:?}",
+            encoded.mappings
+        );
+        assert!(
+            !encoded.redacted_text.contains("/24"),
+            "CIDR prefix left hanging: {}",
+            encoded.redacted_text
+        );
+        assert!(
+            !encoded.redacted_text.contains("10.0.14.0"),
+            "IP leaked: {}",
+            encoded.redacted_text
+        );
+    }
+
+    /// Card expiry/CVV stay put (not PII without the PAN).
+    #[test]
+    fn card_expiry_and_cvv_left_alone() {
+        let vault = Vault::new().unwrap();
+        let encoded = vault
+            .encode("Visa: 4111-1111-1111-1111 expiry 09/28 CVV 123")
+            .unwrap();
+        assert_preserved(&encoded, "09/28", "card expiry");
+        assert_preserved(&encoded, "123", "cvv");
+        assert_detected(&encoded, "4111-1111-1111-1111", "pan");
     }
 }
