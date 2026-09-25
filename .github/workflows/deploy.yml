@@ -24,7 +24,7 @@ jobs:
         with:
           workspaces: pii-tool
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
 
   deploy:
     needs: test
