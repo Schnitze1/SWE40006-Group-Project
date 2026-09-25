@@ -52,12 +52,20 @@ jobs:
       - name: Install cargo-lambda
         run: pip install cargo-lambda
 
+      - name: Install aarch64 GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu
+
       - name: Build Lambda
         env:
-          # ort-sys (ONNX Runtime) needs the C++ standard library at link time.
+          # Build with the GNU cross-toolchain so ort-sys links against a full
+          # aarch64 libstdc++ implementation.
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CXXSTDLIB: stdc++
-          RUSTFLAGS: "-C link-arg=-lstdc++"
-        run: cargo lambda build --release --arm64 -p poco-lambda
+        run: cargo lambda build --release --arm64 --compiler cargo -p poco-lambda
 
       - name: Deploy to Lambda
         run: |
