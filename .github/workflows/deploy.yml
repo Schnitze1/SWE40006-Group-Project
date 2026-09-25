@@ -60,14 +60,17 @@ jobs:
               dnf install -y gcc gcc-c++ make zip unzip openssl-devel git cmake pkgconf perl ca-certificates findutils tar
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
               source "$HOME/.cargo/env"
-              rustc --version
-              cargo --version
-              if ! cargo build --release -p poco-lambda > /tmp/cargo-build.log 2>&1; then
-                echo "=== cargo build failed, tail ==="
-                tail -n 80 /tmp/cargo-build.log
-                exit 1
-              fi
-              test -f target/release/poco-lambda
+              # ONNX Runtime (ort-sys) is prebuilt against glibc 2.38+; AL2023 is 2.34.
+              # Stub the C23 strtoll family so the prebuilt lib links.
+              cat > /tmp/glibc_compat.c << "CEOF"
+          #include <stdlib.h>
+          long long __isoc23_strtoll(const char *nptr, char **endptr, int base) { return strtoll(nptr, endptr, base); }
+          long __isoc23_strtol(const char *nptr, char **endptr, int base) { return strtol(nptr, endptr, base); }
+          unsigned long long __isoc23_strtoull(const char *nptr, char **endptr, int base) { return strtoull(nptr, endptr, base); }
+          unsigned long __isoc23_strtoul(const char *nptr, char **endptr, int base) { return strtoul(nptr, endptr, base); }
+          CEOF
+              cc -c /tmp/glibc_compat.c -o /tmp/glibc_compat.o
+              RUSTFLAGS="-C link-arg=/tmp/glibc_compat.o" cargo build --release -p poco-lambda
               mkdir -p target/lambda/poco-lambda
               cp target/release/poco-lambda target/lambda/poco-lambda/bootstrap
               chmod +x target/lambda/poco-lambda/bootstrap
