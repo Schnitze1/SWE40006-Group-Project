@@ -50,25 +50,21 @@ jobs:
             exit 1
           fi
 
-      - name: Build inside Amazon Linux 2023
+      - name: Build inside cargo-lambda container
         run: |
           docker run --rm \
             -v "$PWD":/work \
             -w /work/pii-tool \
-            amazonlinux:2023 \
-            bash -c '
-              set -euo pipefail
-              dnf install -y gcc gcc-c++ make openssl-devel zip unzip curl
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-              . "$HOME/.cargo/env"
-              cargo build --release -p poco-lambda
-              mkdir -p target/lambda/poco-lambda
-              cp target/release/poco-lambda target/lambda/poco-lambda/bootstrap
-              cd target/lambda/poco-lambda
-              zip -q bootstrap.zip bootstrap
-              echo "=== zip contents ==="
-              unzip -l bootstrap.zip
-            '
+            ghcr.io/cargo-lambda/cargo-lambda:latest \
+            cargo lambda build --release --compiler cargo -p poco-lambda --output-format zip
+
+      - name: Verify artifact
+        run: |
+          echo "=== searching for bootstrap.zip ==="
+          find pii-tool/target -name "bootstrap.zip" -type f
+          ZIP=$(find pii-tool/target -name "bootstrap.zip" -type f | head -n1)
+          echo "Found: $ZIP"
+          unzip -l "$ZIP"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -80,9 +76,10 @@ jobs:
 
       - name: Deploy to Lambda
         run: |
+          ZIP=$(find pii-tool/target -name "bootstrap.zip" -type f | head -n1)
           aws lambda update-function-code \
             --function-name ${{ steps.env.outputs.lambda }} \
-            --zip-file fileb://pii-tool/target/lambda/poco-lambda/bootstrap.zip \
+            --zip-file fileb://$ZIP \
             --region us-east-1
           aws lambda wait function-updated \
             --function-name ${{ steps.env.outputs.lambda }} \

@@ -452,9 +452,7 @@ impl Vault {
     pub fn new() -> Result<Self, VaultError> {
         // En-US activates locale-gated detectors (US phone, SSN). locale-en supplies
         // name cue packs. poc_extra adds free-text person / date / location rules.
-        let extra_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("rules")
-            .join("poc_extra.toml");
+        const EXTRA_RULES: &str = include_str!("../rules/poc_extra.toml");
 
         let pipeline = CorePipelineConfig::new()
             .with_locale(&[LocaleTag::EnUs])
