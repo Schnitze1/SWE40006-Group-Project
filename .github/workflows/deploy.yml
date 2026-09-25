@@ -13,6 +13,9 @@ on:
     branches: [develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -37,6 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pii-tool
@@ -49,15 +54,32 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
+      - name: Install aarch64 GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu
+
       - name: Install cargo-lambda
         run: pip install cargo-lambda
 
       - name: Build Lambda
         env:
-          # ort-sys (ONNX Runtime) needs the C++ standard library at link time.
+          # ONNX Runtime (ort-sys) is C++; link with g++ so libstdc++ is pulled in.
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-g++
           CXXSTDLIB: stdc++
           RUSTFLAGS: "-C link-arg=-lstdc++"
-        run: cargo lambda build --release --arm64 -p poco-lambda
+        run: |
+          set -euo pipefail
+          cargo lambda build --release --arm64 -p poco-lambda
+          # Normalise zip path for the deploy step.
+          mkdir -p target/lambda/poco-lambda
+          if [ ! -f target/lambda/poco-lambda/bootstrap.zip ]; then
+            ZIP="$(find target/lambda -name '*.zip' | head -n1)"
+            cp "$ZIP" target/lambda/poco-lambda/bootstrap.zip
+          fi
+          ls -la target/lambda/poco-lambda/
 
       - name: Deploy to Lambda
         run: |
