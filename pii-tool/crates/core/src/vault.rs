@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use gaze::LocaleTag;
 use gaze_assembly::CorePipelineConfig;
 
@@ -452,14 +450,15 @@ impl Vault {
     pub fn new() -> Result<Self, VaultError> {
         // En-US activates locale-gated detectors (US phone, SSN). locale-en supplies
         // name cue packs. poc_extra adds free-text person / date / location rules.
-        let extra_rules = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("rules")
-            .join("poc_extra.toml");
+        let rules_content = include_str!("../rules/poc_extra.toml");
+        let rules_path = std::env::temp_dir().join("poc_extra.toml");
+        std::fs::write(&rules_path, rules_content)
+            .map_err(|e| VaultError::Pipeline(format!("Failed to write extra rules: {}", e)))?;
 
         let pipeline = CorePipelineConfig::new()
             .with_locale(&[LocaleTag::EnUs])
             .with_bundled_rulepack("locale-en")
-            .with_rulepack_path(extra_rules)
+            .with_rulepack_path(rules_path)
             .build()
             .map_err(|e| VaultError::Pipeline(e.to_string()))?
             .pipeline()
