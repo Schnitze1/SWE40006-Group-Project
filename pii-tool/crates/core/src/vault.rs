@@ -450,14 +450,21 @@ fn next_gaze_token(text: &str, from: usize) -> Option<GazeToken> {
 
 impl Vault {
     pub fn new() -> Result<Self, VaultError> {
-        // En-US activates locale-gated detectors (US phone, SSN). locale-en supplies
-        // name cue packs. poc_extra adds free-text person / date / location rules.
         const EXTRA_RULES: &str = include_str!("../rules/poc_extra.toml");
+
+        // Write embedded rules to a runtime path (works on Lambda's /tmp and
+        // locally via the OS temp dir). Written once per process.
+        let rules_path = std::env::temp_dir().join("poco_poc_extra.toml");
+        if !rules_path.exists() {
+            std::fs::write(&rules_path, EXTRA_RULES).map_err(|e| {
+                VaultError::Pipeline(format!("failed to write embedded rules: {}", e))
+            })?;
+        }
 
         let pipeline = CorePipelineConfig::new()
             .with_locale(&[LocaleTag::EnUs])
             .with_bundled_rulepack("locale-en")
-            .with_rulepack_path(extra_rules)
+            .with_rulepack_path(&rules_path)
             .build()
             .map_err(|e| VaultError::Pipeline(e.to_string()))?
             .pipeline()
