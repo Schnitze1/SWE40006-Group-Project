@@ -53,27 +53,26 @@ fn err_body(msg: &str) -> String {
 pub fn route(method: &str, path: &str, body: &str) -> Response<String> {
     let method = method.to_uppercase();
     let path = path.split('?').next().unwrap_or(path);
+    // API Gateway may include the stage prefix (/dev/encode). Match the last segment.
+    let segment = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("");
 
     if method == "OPTIONS" {
         let empty = String::new();
         return json_response(200, empty);
     }
-    if method == "GET" {
-        let last = path.rsplit('/').next().unwrap_or("");
-        if last == "health" {
-            let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
-            let version = env!("CARGO_PKG_VERSION");
-            let payload = json!({
-                "status": "ok",
-                "version": version,
-                "env": env,
-                "path": path
-            });
-            let body = payload.to_string();
-            return json_response(200, body);
-        }
+    if method == "GET" && segment == "health" {
+        let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
+        let version = env!("CARGO_PKG_VERSION");
+        let payload = json!({
+            "status": "ok",
+            "version": version,
+            "env": env,
+            "path": path
+        });
+        let body = payload.to_string();
+        return json_response(200, body);
     }
-    if method == "POST" && path == "/encode" {
+    if method == "POST" && segment == "encode" {
         let started = Instant::now();
         let parsed: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -128,7 +127,7 @@ pub fn route(method: &str, path: &str, body: &str) -> Response<String> {
         let body = out.to_string();
         return json_response(200, body);
     }
-    if method == "POST" && path == "/decode" {
+    if method == "POST" && segment == "decode" {
         let body = err_body("decode not yet wired to DynamoDB sessions");
         return json_response(501, body);
     }
@@ -214,6 +213,24 @@ mod tests {
             assert!(headers.contains_key("Access-Control-Allow-Headers"));
             assert!(headers.contains_key("Access-Control-Allow-Methods"));
         }
+    }
+
+    #[test]
+    fn encode_works_with_stage_prefix() {
+        let resp = route(
+            "POST",
+            "/dev/encode",
+            r#"{"text":"Contact alice@example.com"}"#,
+        );
+        assert_eq!(resp.status().as_u16(), 200);
+        assert!(resp.body().contains("[Email_1]"), "body: {}", resp.body());
+    }
+
+    #[test]
+    fn health_works_with_stage_prefix() {
+        let resp = route("GET", "/staging/health", "");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert!(resp.body().contains("\"status\":\"ok\""));
     }
 
     #[test]
