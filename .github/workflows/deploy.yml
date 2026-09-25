@@ -1,3 +1,11 @@
+# AWS Academy Learner Lab deployment — routes by branch to dev/test/staging/prod.
+#
+# Hard constraints (do not "fix" by adding IAM/OIDC):
+#   * Region is locked to us-east-1 (hardcoded — do not parameterise).
+#   * No IAM role creation, no OIDC providers. Runtime uses the pre-existing LabRole.
+#   * GitHub Actions auth uses static credentials in GitHub secrets only.
+#   * Deploy is update-function-code only.
+
 name: Deploy
 
 on:
@@ -8,6 +16,9 @@ on:
       - 'release/**'
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -70,11 +81,53 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
+      - name: Install aarch64 GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu
+
       - name: Install cargo-lambda
         run: pip install cargo-lambda
 
       - name: Build Lambda
-        run: cargo lambda build --release --arm64 -p poco-lambda
+        env:
+          # ONNX Runtime (ort-sys) is C++; g++ as linker pulls in libstdc++.
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-g++
+          CXXSTDLIB: stdc++
+          RUSTFLAGS: "-C link-arg=-lstdc++"
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          rustup show
+          cargo lambda build --release --arm64 -p poco-lambda
+          echo "=== target/lambda contents ==="
+          find target/lambda -type f 2>/dev/null | head -50 || true
+          BOOTDIR="target/lambda/poco-lambda"
+          mkdir -p "$BOOTDIR"
+          if [ -f "$BOOTDIR/bootstrap.zip" ]; then
+            echo "found $BOOTDIR/bootstrap.zip"
+          elif [ -f "$BOOTDIR/bootstrap" ]; then
+            (cd "$BOOTDIR" && zip -q bootstrap.zip bootstrap)
+            echo "zipped bootstrap binary"
+          else
+            ZIP="$(find target/lambda -name '*.zip' -type f 2>/dev/null | head -n1 || true)"
+            BIN="$(find target/lambda -type f -name 'bootstrap*' 2>/dev/null | head -n1 || true)"
+            if [ -n "$ZIP" ]; then
+              cp "$ZIP" "$BOOTDIR/bootstrap.zip"
+              echo "copied $ZIP"
+            elif [ -n "$BIN" ]; then
+              cp "$BIN" "$BOOTDIR/bootstrap"
+              (cd "$BOOTDIR" && zip -q bootstrap.zip bootstrap)
+              echo "packed $BIN"
+            else
+              echo "No bootstrap artifact under target/lambda"
+              find target -type f -name '*poco*' 2>/dev/null | head -50 || true
+              exit 1
+            fi
+          fi
+          ls -la "$BOOTDIR"
 
       - name: Deploy to Lambda
         run: |
