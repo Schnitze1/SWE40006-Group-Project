@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pii-tool
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pii-tool
@@ -76,12 +76,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo lambda build --release \
-            --target aarch64-unknown-linux-gnu.2.34 \
+            --target x86_64-unknown-linux-gnu.2.34 \
             -p poco-lambda \
             --output-format zip
           echo "=== artifact search ==="
           find target -name "*.zip" -type f
-          echo "=== artifact details ==="
           ARTIFACT=$(find target -name "bootstrap.zip" -type f | head -n1)
           echo "Found: $ARTIFACT"
           unzip -l "$ARTIFACT"
