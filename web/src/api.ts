@@ -60,4 +60,21 @@ export async function health(): Promise<{ status: string; version: string; env: 
   return res.json()
 }
 
+export async function upsertMapping(
+  sessionId: string,
+  mapping: { token: string; value: string; category?: string }
+): Promise<{ sessionId: string; mapping: Mapping }> {
+  return post(`/sessions/${sessionId}/mappings`, mapping)
+}
+
+export async function deleteMapping(sessionId: string, token: string): Promise<void> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/mappings/${encodeURIComponent(token)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text()
+    throw new Error(text || `HTTP ${res.status}`)
+  }
+}
+
 export { BASE as API_BASE, STAGE as API_STAGE }

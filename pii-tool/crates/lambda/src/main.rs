@@ -7,7 +7,7 @@ use serde_json::json;
 use std::time::Instant;
 
 use poco_core::vault::{TokenMapping, Vault};
-use session::{category_of, delete_session, load_mappings, store_mappings};
+use session::{category_of, delete_mapping, delete_session, load_mappings, store_mappings, upsert_mapping};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +75,18 @@ fn session_id_from_path(path: &str) -> Option<String> {
         None
     } else {
         Some((*id).to_string())
+    }
+}
+
+/// Token from `/sessions/{id}/mappings/{token}` — last path segment.
+fn token_from_path(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let idx = parts.iter().position(|p| *p == "mappings")?;
+    let tok = parts.get(idx + 1)?;
+    if tok.is_empty() {
+        None
+    } else {
+        Some((*tok).to_string())
     }
 }
 
@@ -242,6 +254,76 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
         return json_response(200, body);
     }
 
+    if method == "PUT" && segment == "mappings" {
+        let session_id = match session_id_from_path(path) {
+            Some(s) => s,
+            None => {
+                let b = err_body("sessionId is required");
+                return json_response(400, b);
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                let b = err_body("invalid json");
+                return json_response(400, b);
+            }
+        };
+        let token = match parsed.get("token").and_then(|t| t.as_str()) {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => {
+                let b = err_body("token is required");
+                return json_response(400, b);
+            }
+        };
+        let value = parsed
+            .get("value")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let category = parsed
+            .get("category")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Err(e) = upsert_mapping(&session_id, &token, &value, &category).await {
+            let b = err_body(&e);
+            return json_response(500, b);
+        }
+        let out = json!({
+            "sessionId": session_id,
+            "mapping": {
+                "token": token,
+                "value": value,
+                "category": if category.is_empty() { category_of(&token) } else { category }
+            }
+        });
+        let body = out.to_string();
+        return json_response(200, body);
+    }
+
+    if method == "DELETE" && path.contains("/mappings/") {
+        let session_id = match session_id_from_path(path) {
+            Some(s) => s,
+            None => {
+                let b = err_body("sessionId is required");
+                return json_response(400, b);
+            }
+        };
+        let token = match token_from_path(path) {
+            Some(t) => t,
+            None => {
+                let b = err_body("token is required");
+                return json_response(400, b);
+            }
+        };
+        if let Err(e) = delete_mapping(&session_id, &token).await {
+            let b = err_body(&e);
+            return json_response(500, b);
+        }
+        return empty_response(204);
+    }
+
     if method == "DELETE" && path.contains("/sessions/") {
         let session_id = match session_id_from_path(path) {
             Some(s) => s,
@@ -370,6 +452,74 @@ mod tests {
         let get = route("GET", &format!("/api/v1/sessions/{sid}/mappings"), "").await;
         assert_eq!(get.status().as_u16(), 200);
         assert!(get.body().contains("alice@example.com"), "{}", get.body());
+    }
+
+    #[tokio::test]
+    async fn mapping_update_changes_decode() {
+        let sid = "test-map-update-1";
+        route(
+            "POST",
+            "/encode",
+            &format!(r#"{{"sessionId":"{sid}","text":"Contact alice@example.com"}}"#),
+        )
+        .await;
+        let put = route(
+            "PUT",
+            &format!("/api/v1/sessions/{sid}/mappings"),
+            r#"{"token":"Email_1","value":"bob@corp.com","category":"Email"}"#,
+        )
+        .await;
+        assert_eq!(put.status().as_u16(), 200);
+        assert!(put.body().contains("bob@corp.com"), "{}", put.body());
+        let dec = route(
+            "POST",
+            "/decode",
+            &format!(r#"{{"sessionId":"{sid}","text":"see [Email_1]"}}"#),
+        )
+        .await;
+        assert_eq!(dec.status().as_u16(), 200);
+        assert!(dec.body().contains("bob@corp.com"), "{}", dec.body());
+    }
+
+    #[tokio::test]
+    async fn mapping_delete_makes_token_hallucination() {
+        let sid = "test-map-del-1";
+        route(
+            "POST",
+            "/encode",
+            &format!(r#"{{"sessionId":"{sid}","text":"Contact alice@example.com"}}"#),
+        )
+        .await;
+        let del = route(
+            "DELETE",
+            &format!("/api/v1/sessions/{sid}/mappings/Email_1"),
+            "",
+        )
+        .await;
+        assert_eq!(del.status().as_u16(), 204);
+        let dec = route(
+            "POST",
+            "/decode",
+            &format!(r#"{{"sessionId":"{sid}","text":"see [Email_1]"}}"#),
+        )
+        .await;
+        assert_eq!(dec.status().as_u16(), 200);
+        let body = dec.body();
+        assert!(body.contains("Email_1"), "body: {body}");
+        assert!(body.contains("hallucinations"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn mapping_put_requires_token() {
+        let sid = "test-map-bad-1";
+        let put = route(
+            "PUT",
+            &format!("/api/v1/sessions/{sid}/mappings"),
+            r#"{"value":"x"}"#,
+        )
+        .await;
+        assert_eq!(put.status().as_u16(), 400);
+        assert!(put.body().contains("token is required"));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { sampleReply, sampleText } from './mocks/demo'
 import type { Mapping } from './api'
-import { decodeText, encodeText, health, API_STAGE } from './api'
+import { decodeText, deleteMapping, encodeText, health, upsertMapping, API_STAGE } from './api'
 import { Vault } from './components/Vault'
 import './App.css'
 
@@ -137,9 +137,36 @@ function App() {
     }
   }
 
-  function changeMappings(mappings: Mapping[]) {
+  async function changeMappings(mappings: Mapping[]) {
+    const previous = active.mappings
+    if (sessionId) {
+      try {
+        for (const old of previous) {
+          if (!mappings.some((m) => m.token === old.token)) {
+            await deleteMapping(sessionId, old.token)
+          }
+        }
+        for (const next of mappings) {
+          const before = previous.find((p) => p.token === next.token)
+          if (!before || before.value !== next.value || before.category !== next.category) {
+            await upsertMapping(sessionId, {
+              token: next.token,
+              value: next.value,
+              category: next.category,
+            })
+          }
+        }
+      } catch (e) {
+        setNotice(`Vault sync failed: ${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
+    }
     updateDocument(activeId, { mappings, restored: '', unknown: [] })
-    setNotice('Local vault view updated. Server decode still uses the last encode session.')
+    setNotice(
+      sessionId
+        ? 'Vault updated on the server. Decode again to use the new values.'
+        : 'Local vault updated. Encode first so the server can store mappings.'
+    )
   }
 
   async function upload(file?: File) {
@@ -191,7 +218,7 @@ function App() {
         <main>
           <div className="page-heading"><div><h1>{page}</h1><p>{descriptions[page]}</p></div>
             <div className="page-actions">
-            {page === 'Vault' && <button className="danger" disabled={!active.mappings.length} onClick={() => { changeMappings([]); setNotice('Local vault view cleared.') }}>Reset vault</button>}
+            {page === 'Vault' && <button className="danger" disabled={!active.mappings.length} onClick={() => { void changeMappings([]) }}>Reset vault</button>}
               <button className="theme-button" onClick={() => setLight(!light)} aria-label={`Switch to ${light ? 'dark' : 'light'} theme`}>
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 1v2m0 18v2M1 12h2m18 0h2M4 4l2 2m12 12 2 2M4 20l2-2M18 6l2-2" /></svg>
         </button>
@@ -250,10 +277,12 @@ function App() {
             {!encoding && !!active.unknown.length && <p className="warning" role="alert">Unknown tokens left unchanged: {active.unknown.join(', ')}</p>}
           </>}
 
-          {page === 'Vault' && <Vault key={activeId} mappings={active.mappings} onChange={changeMappings} onAdd={() => {
+          {page === 'Vault' && <Vault key={activeId} mappings={active.mappings} onChange={(next) => {
+            void changeMappings(next)
+          }} onAdd={() => {
             const mapping = { token: `Custom_${active.nextToken}`, value: 'new value', category: 'Custom', firstOffset: 0 }
-            updateDocument(activeId, { mappings: [...active.mappings, mapping], nextToken: active.nextToken + 1, restored: '', unknown: [] })
-            setNotice('Local token added. Server vault still uses the last encode session.')
+            void changeMappings([...active.mappings, mapping])
+            updateDocument(activeId, { nextToken: active.nextToken + 1 })
           }} />}
           <p className="status" role="status">{notice}</p>
         </main>

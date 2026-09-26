@@ -158,6 +158,43 @@ Empty session → `"mappings": []`.
 
 ---
 
+## `PUT /api/v1/sessions/{sessionId}/mappings`
+
+Insert or replace one mapping (Vault edit / add token).
+
+**Request**
+
+```json
+{ "token": "Email_1", "value": "s.mitchell@university.edu", "category": "Email" }
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `token` | string | yes | Readable token class (`Email_1`, `Custom_2`, …). |
+| `value` | string | yes | Original value to restore on decode (may be empty). |
+| `category` | string | no | Defaults to a class-derived label. |
+
+**200**
+
+```json
+{
+  "sessionId": "3f2c9a1e-…",
+  "mapping": { "token": "Email_1", "value": "s.mitchell@university.edu", "category": "Email" }
+}
+```
+
+**400** missing `sessionId` or `token`.
+
+---
+
+## `DELETE /api/v1/sessions/{sessionId}/mappings/{token}`
+
+Remove one mapping. Idempotent.
+
+**204** no body. After this, that token decodes as a hallucination.
+
+---
+
 ## `DELETE /api/v1/sessions/{sessionId}`
 
 Clear the session vault (all tokens for that id).

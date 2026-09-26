@@ -176,6 +176,107 @@ pub async fn load_mappings(session_id: &str) -> Result<Vec<TokenMapping>, String
     }
 }
 
+/// Insert or replace one mapping in a session (keeps other tokens).
+pub async fn upsert_mapping(
+    session_id: &str,
+    token: &str,
+    value: &str,
+    category: &str,
+) -> Result<(), String> {
+    let sid = session_id.to_string();
+    let tok = token.to_string();
+    let val = value.to_string();
+    let cat = if category.is_empty() {
+        category_of(&tok)
+    } else {
+        category.to_string()
+    };
+    match table_name() {
+        None => {
+            let maps = memory_maps();
+            let mut mem = maps.lock().unwrap_or_else(|e| e.into_inner());
+            let rows = mem.entry(sid).or_default();
+            let offset = rows
+                .iter()
+                .find(|(c, _, _)| *c == tok)
+                .map(|(_, _, o)| *o)
+                .unwrap_or(0);
+            if let Some(existing) = rows.iter_mut().find(|(c, _, _)| *c == tok) {
+                existing.1 = val;
+            } else {
+                rows.push((tok, val, offset));
+            }
+            Ok(())
+        }
+        Some(table) => {
+            let config = aws_config::load_from_env().await;
+            let client = DynamoClient::new(&config);
+            let expires = now_epoch() + TTL_SECS;
+            let mut item = HashMap::new();
+            let k_session = "sessionId".to_string();
+            let sid_av = av_s(&sid);
+            item.insert(k_session, sid_av);
+            let k_token = "token".to_string();
+            let token_av = av_s(&tok);
+            item.insert(k_token, token_av);
+            let k_value = "value".to_string();
+            let value_av = av_s(&val);
+            item.insert(k_value, value_av);
+            let k_category = "category".to_string();
+            let cat_av = av_s(&cat);
+            item.insert(k_category, cat_av);
+            let k_expires = "expiresAt".to_string();
+            let exp_av = av_n(expires);
+            item.insert(k_expires, exp_av);
+            let stored = client
+                .put_item()
+                .table_name(&table)
+                .set_item(Some(item))
+                .send()
+                .await;
+            if let Err(e) = stored {
+                let msg = format!("dynamodb put: {e}");
+                return Err(msg);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Remove one mapping. Idempotent.
+pub async fn delete_mapping(session_id: &str, token: &str) -> Result<(), String> {
+    let sid = session_id.to_string();
+    let tok = token.to_string();
+    match table_name() {
+        None => {
+            let maps = memory_maps();
+            let mut mem = maps.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(rows) = mem.get_mut(&sid) {
+                rows.retain(|(c, _, _)| *c != tok);
+            }
+            Ok(())
+        }
+        Some(table) => {
+            let config = aws_config::load_from_env().await;
+            let client = DynamoClient::new(&config);
+            let sid_av = av_s(&sid);
+            let tok_av = av_s(&tok);
+            let deleted = client
+                .delete_item()
+                .table_name(&table)
+                .key("sessionId", sid_av)
+                .key("token", tok_av)
+                .send()
+                .await;
+            if let Err(e) = deleted {
+                let msg = format!("dynamodb delete: {e}");
+                return Err(msg);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub async fn delete_session(session_id: &str) -> Result<(), String> {
     let sid = session_id.to_string();
     match table_name() {
