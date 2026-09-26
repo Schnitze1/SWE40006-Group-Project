@@ -23,11 +23,11 @@ const BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) ||
   `https://6xz841x652.execute-api.us-east-1.amazonaws.com/${STAGE}`
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   })
   const text = await res.text()
   let data: unknown = null
@@ -44,6 +44,10 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     throw new Error(msg)
   }
   return data as T
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  return request<T>('POST', path, body)
 }
 
 export async function encodeText(
@@ -100,7 +104,7 @@ export async function upsertMapping(
   sessionId: string,
   mapping: { token: string; value: string; category?: string }
 ): Promise<{ sessionId: string; mapping: Mapping }> {
-  return post(`/sessions/${sessionId}/mappings`, mapping)
+  return request('PUT', `/sessions/${sessionId}/mappings`, mapping)
 }
 
 export async function deleteMapping(sessionId: string, token: string): Promise<void> {

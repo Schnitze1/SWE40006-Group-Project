@@ -1,25 +1,56 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { sampleReply, sampleText } from './mocks/demo'
 import type { Mapping } from './api'
-import { decodeText, deleteMapping, encodeText, extractFile, fileToBase64, health, upsertMapping, API_STAGE } from './api'
+import {
+  decodeText,
+  deleteMapping,
+  encodeText,
+  extractFile,
+  fileToBase64,
+  health,
+  upsertMapping,
+  API_STAGE,
+} from './api'
+import { DocumentTabs } from './components/DocumentTabs'
 import { Vault } from './components/Vault'
 import './App.css'
 
 type Page = 'Encode' | 'Decode' | 'Vault'
+
 type Document = {
   id: number
   name: string
+  /** raw source / LLM reply text for the active editor */
   input: string
-  output: string
   reply: string
+  output: string
   restored: string
   unknown: string[]
   mappings: Mapping[]
-  nextToken: number
+  /** next free counter per token class, e.g. { Name: 3, Email: 1 } */
+  nextIdx: Record<string, number>
 }
 
-function newDocument(id: number): Document {
-  return { id, name: `document-${id}.txt`, input: '', output: '', reply: '', restored: '', unknown: [], mappings: [], nextToken: 1 }
+function nextCounter(map: Record<string, number>, cls: string): number {
+  return map[cls] ?? 1
+}
+
+function bumpCounter(map: Record<string, number>, cls: string): Record<string, number> {
+  return { ...map, [cls]: (map[cls] ?? 1) + 1 }
+}
+
+function newDocument(id: number, name?: string): Document {
+  return {
+    id,
+    name: name ?? `document-${id}.txt`,
+    input: '',
+    reply: '',
+    output: '',
+    restored: '',
+    unknown: [],
+    mappings: [],
+    nextIdx: {},
+  }
 }
 
 function loadSessionId(): string | null {
@@ -39,32 +70,78 @@ function saveSessionId(id: string) {
 }
 
 function NavIcon({ page }: { page: Page }) {
-  return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-    {page === 'Vault' ? <><rect x="3" y="4" width="18" height="5" rx="1" /><path d="M5 9v11h14V9M10 13h4" /></> : <><rect x="5" y="10" width="14" height="11" rx="2" /><path d={page === 'Encode' ? 'M8 10V6a4 4 0 0 1 8 0v4' : 'M8 10V6a4 4 0 0 1 8 0'} /></>}
-  </svg>
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+      {page === 'Vault' ? (
+        <>
+          <rect x="3" y="4" width="18" height="5" rx="1" />
+          <path d="M5 9v11h14V9M10 13h4" />
+        </>
+      ) : (
+        <>
+          <rect x="5" y="10" width="14" height="11" rx="2" />
+          <path d={page === 'Encode' ? 'M8 10V6a4 4 0 0 1 8 0v4' : 'M8 10V6a4 4 0 0 1 8 0'} />
+        </>
+      )}
+    </svg>
+  )
 }
 
 function TokenText({ text, mappings }: { text: string; mappings: Mapping[] }) {
   return text.split(/(\[[A-Za-z][A-Za-z0-9_:]*_\d+\])/g).map((part, index) => {
     const mapping = mappings.find((m) => `[${m.token}]` === part)
-    return mapping ? <mark key={index} className={`token-${mapping.category.toLowerCase()}`}>{part}</mark> : part
+    return mapping ? (
+      <mark key={index} className={`token-${mapping.category.toLowerCase()}`}>
+        {part}
+      </mark>
+    ) : (
+      part
+    )
   })
+}
+
+/** Word under the caret/selection in a textarea. */
+function wordAtSelection(textarea: HTMLTextAreaElement): string {
+  const text = textarea.value
+  let start = textarea.selectionStart
+  let end = textarea.selectionEnd
+  if (start === end) {
+    // expand around caret
+    while (start > 0 && /[\p{L}\p{N}'’@._+-]/u.test(text[start - 1] ?? '')) start -= 1
+    while (end < text.length && /[\p{L}\p{N}'’@._+-]/u.test(text[end] ?? '')) end += 1
+  }
+  return text.slice(start, end).trim()
+}
+
+const CLASS_OPTIONS = ['Name', 'Email', 'Phone', 'Location', 'Date', 'Passport', 'Ssn', 'Iban', 'CreditCard', 'Organization', 'Custom']
+
+function guessClass(word: string): string {
+  if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(word)) return 'Email'
+  if (/^[+()\d][\d\s()-]{6,}$/.test(word)) return 'Phone'
+  if (/^\d{4}[-\s]?\d{4}/.test(word.replace(/\s/g, ''))) return 'CreditCard'
+  if (/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$/.test(word)) return 'Name'
+  return 'Custom'
 }
 
 function App() {
   const [page, setPage] = useState<Page>('Encode')
   const [light, setLight] = useState(false)
-  const [documents, setDocuments] = useState<Document[]>([newDocument(1)])
-  const [activeId, setActiveId] = useState(1)
+  const [documents, setDocuments] = useState<Document[]>(() => [newDocument(1)])
+  /** Independent active-doc pointers per view (spec). */
+  const [activeEncode, setActiveEncode] = useState(1)
+  const [activeVault, setActiveVault] = useState(1)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [apiStatus, setApiStatus] = useState<string>('checking…')
   const [sessionId, setSessionId] = useState<string | null>(loadSessionId)
-  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
+  const [draftToken, setDraftToken] = useState<{ value: string; cls: string } | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
-  const nextDocumentId = useRef(2)
-  const active = documents.find((doc) => doc.id === activeId)!
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const docCounter = useRef(1)
+
   const encoding = page === 'Encode'
+  const activeViewId = page === 'Vault' ? activeVault : activeEncode
+  const active = documents.find((doc) => doc.id === activeViewId) ?? documents[0]
   const input = encoding ? active.input : active.reply
   const output = encoding ? active.output : active.restored
 
@@ -74,38 +151,68 @@ function App() {
       .catch(() => setApiStatus('API offline'))
   }, [])
 
+  const tabDocs = useMemo(() => documents.map((d) => ({ id: d.id, name: d.name })), [documents])
+
   function updateDocument(id: number, changes: Partial<Document>) {
-    setDocuments((previous) => previous.map((doc) => doc.id === id ? { ...doc, ...changes } : doc))
+    setDocuments((previous) => previous.map((doc) => (doc.id === id ? { ...doc, ...changes } : doc)))
   }
 
   function navigate(next: Page) {
     setPage(next)
     setNotice('')
+    setDraftToken(null)
+  }
+
+  /** Jump to related view keeping the same document (spec). */
+  function jumpTo(target: Page) {
+    if (target === 'Vault') setActiveVault(activeEncode)
+    else if (target === 'Encode' || target === 'Decode') setActiveEncode(activeVault)
+    navigate(target)
+  }
+
+  function closeDocument(id: number) {
+    if (documents.length <= 1) return
+    const remaining = documents.filter((doc) => doc.id !== id)
+    setDocuments(remaining)
+    if (activeEncode === id) setActiveEncode(remaining[0].id)
+    if (activeVault === id) setActiveVault(remaining[0].id)
+    setNotice('Document closed.')
+    setDraftToken(null)
   }
 
   function addDocument() {
-    const doc = newDocument(nextDocumentId.current++)
+    docCounter.current += 1
+    const id = Date.now() + docCounter.current
+    const doc = newDocument(id, `document-${docCounter.current}.txt`)
     setDocuments((previous) => [...previous, doc])
-    setActiveId(doc.id)
+    setActiveEncode(doc.id)
+    setActiveVault(doc.id)
     setNotice('')
+    setDraftToken(null)
   }
 
   async function encode() {
     setBusy(true)
     setNotice('')
+    const documentId = active.id
     try {
       const result = await encodeText(sessionId, active.input)
       saveSessionId(result.sessionId)
       setSessionId(result.sessionId)
-      updateDocument(activeId, {
+      const nextIdx: Record<string, number> = {}
+      for (const m of result.mappings) {
+        const cls = m.category || 'Custom'
+        const n = Number((m.token.match(/_(\d+)$/) ?? [])[1] ?? '1')
+        nextIdx[cls] = Math.max(nextIdx[cls] ?? 1, n + 1)
+      }
+      updateDocument(documentId, {
         output: result.redactedText,
         mappings: result.mappings,
         restored: '',
         unknown: [],
+        nextIdx,
       })
-      setNotice(
-        `${result.mappings.length} values replaced · session ${result.sessionId.slice(0, 8)}… stored for decode.`
-      )
+      setNotice(`${result.mappings.length} values replaced · session ${result.sessionId.slice(0, 8)}…`)
     } catch (e) {
       setNotice(`Encode failed: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -122,7 +229,7 @@ function App() {
     setNotice('')
     try {
       const result = await decodeText(sessionId, active.reply)
-      updateDocument(activeId, {
+      updateDocument(active.id, {
         restored: result.restoredText,
         unknown: result.hallucinations,
       })
@@ -140,6 +247,7 @@ function App() {
 
   async function changeMappings(mappings: Mapping[]) {
     const previous = active.mappings
+    const documentId = active.id
     if (sessionId) {
       try {
         for (const old of previous) {
@@ -162,12 +270,34 @@ function App() {
         return
       }
     }
-    updateDocument(activeId, { mappings, restored: '', unknown: [] })
-    setNotice(
-      sessionId
-        ? 'Vault updated on the server. Decode again to use the new values.'
-        : 'Local vault updated. Encode first so the server can store mappings.'
-    )
+    updateDocument(documentId, { mappings, restored: '', unknown: [] })
+    setNotice(sessionId ? 'Vault updated on the server.' : 'Local vault updated. Encode first to persist.')
+  }
+
+  /** Create a token from a word the user clicked in the input. */
+  function addTokenFromWord(word: string) {
+    const cls = guessClass(word)
+    setDraftToken({ value: word, cls })
+    setActiveVault(active.id)
+    setPage('Vault')
+    setNotice(`New token drafted from “${word}”. Choose a class and save.`)
+  }
+
+  function commitDraftToken() {
+    if (!draftToken) return
+    const cls = draftToken.cls
+    const n = nextCounter(active.nextIdx, cls)
+    const token = `${cls}_${n}`
+    const mapping: Mapping = {
+      token,
+      value: draftToken.value,
+      category: cls,
+      firstOffset: active.input.indexOf(draftToken.value),
+    }
+    const nextMappings = [...active.mappings, mapping]
+    updateDocument(active.id, { nextIdx: bumpCounter(active.nextIdx, cls) })
+    void changeMappings(nextMappings)
+    setDraftToken(null)
   }
 
   async function upload(file?: File) {
@@ -176,17 +306,24 @@ function App() {
       setNotice('Choose a .txt, .md, .pdf, or .docx file.')
       return
     }
-    if (file.size > 5_000_000) {
-      setNotice('Choose a file smaller than 5 MB.')
+    if (file.size > 12_000_000) {
+      setNotice('Choose a file smaller than 12 MB.')
       return
     }
-    const documentId = activeId
+    const documentId = active.id
     setBusy(true)
     try {
       const isBinary = /\.(pdf|docx)$/i.test(file.name)
       let text = ''
       if (isBinary) {
         const fileBase64 = await fileToBase64(file)
+        // Guard API Gateway / Lambda payload cap (~6MB usable). Large PDFs 413.
+        if (fileBase64.length > 4_500_000) {
+          setNotice(
+            'File is too large to send to the API after base64 encoding (HTTP 413). Try a smaller PDF or paste extracted text.'
+          )
+          return
+        }
         const extracted = await extractFile(file.name, fileBase64)
         text = extracted.text
         setNotice(`Extracted ${text.length} characters from ${file.name}.`)
@@ -194,166 +331,285 @@ function App() {
         text = await file.text()
         setNotice(`File loaded. Ready to ${encoding ? 'encode' : 'decode'}.`)
       }
-      updateDocument(documentId, encoding
-        ? { name: file.name, input: text, output: '' }
-        : { reply: text, restored: '', unknown: [] })
+      updateDocument(
+        documentId,
+        encoding ? { name: file.name, input: text, output: '' } : { reply: text, restored: '', unknown: [] }
+      )
     } catch (e) {
-      setNotice(`Upload failed: ${e instanceof Error ? e.message : String(e)}`)
+      const msg = e instanceof Error ? e.message : String(e)
+      if (/413|too large/i.test(msg)) {
+        setNotice('Upload failed: file too large for the API (HTTP 413). Compress the PDF or paste text instead.')
+      } else {
+        setNotice(`Upload failed: ${msg}`)
+      }
     } finally {
       setBusy(false)
     }
   }
 
-  function requestDeleteDocument(id: number) {
-    if (documents.length <= 1) {
-      setNotice('Keep at least one document.')
-      return
-    }
-    setConfirmDeleteId(id)
-    setNotice('Click the × again to delete this document.')
-  }
-
-  function deleteDocument(id: number) {
-    if (documents.length <= 1) {
-      setNotice('Keep at least one document.')
-      setConfirmDeleteId(null)
-      return
-    }
-    const remaining = documents.filter((doc) => doc.id !== id)
-    setDocuments(remaining)
-    if (activeId === id) {
-      setActiveId(remaining[0].id)
-    }
-    setConfirmDeleteId(null)
-    setNotice('Document deleted.')
-  }
-
   async function copy(text: string) {
-    try { await navigator.clipboard.writeText(text); setNotice('Copied to clipboard.') }
-    catch { setNotice('Could not copy automatically. Select the output and copy it manually.') }
+    try {
+      await navigator.clipboard.writeText(text)
+      setNotice('Copied to clipboard.')
+    } catch {
+      setNotice('Could not copy automatically. Select the output and copy it manually.')
+    }
+  }
+
+  function handleInputClick() {
+    const el = inputRef.current
+    if (!el || !encoding) return
+    const word = wordAtSelection(el)
+    if (word && word.length >= 2) addTokenFromWord(word)
   }
 
   const descriptions = {
-    Encode: 'Replace sensitive information with tokens via the API.',
+    Encode: 'Replace sensitive information with tokens via the API. Click a word in the input to draft a token.',
     Decode: 'Restore tokens using the server session vault.',
-    Vault: 'Inspect the mappings returned by encode.',
+    Vault: 'Inspect and edit mappings. Close tabs only when more than one document is open.',
   }
 
   return (
     <div className={`app-shell${light ? ' light' : ''}`}>
       <aside className="sidebar">
         <button className="brand" onClick={() => navigate('Encode')} aria-label="Poco home">
-          <span className="logo-frame"><img src={`${import.meta.env.BASE_URL}poco_logo.png`} alt="" /></span>
+          <span className="logo-frame">
+            <img src={`${import.meta.env.BASE_URL}poco_logo.png`} alt="" />
+          </span>
           <span>Poco</span>
         </button>
         <nav aria-label="Main navigation">
           {(['Encode', 'Decode', 'Vault'] as const).map((item) => (
-            <button key={item} className={`nav-item${page === item ? ' active' : ''}`} aria-current={page === item ? 'page' : undefined} onClick={() => navigate(item)}>
-              <NavIcon page={item} /><span><strong>{item}</strong><small>{{ Encode: 'Protect sensitive text', Decode: 'Restore original text', Vault: 'Inspect stored mappings' }[item]}</small></span>
+            <button
+              key={item}
+              className={`nav-item${page === item ? ' active' : ''}`}
+              aria-current={page === item ? 'page' : undefined}
+              onClick={() => jumpTo(item)}
+            >
+              <NavIcon page={item} />
+              <span>
+                <strong>{item}</strong>
+                <small>
+                  {
+                    {
+                      Encode: 'Protect sensitive text',
+                      Decode: 'Restore original text',
+                      Vault: 'Inspect stored mappings',
+                    }[item]
+                  }
+                </small>
+              </span>
             </button>
           ))}
         </nav>
         <p className="demo-note">
-          Stage: <strong>{API_STAGE}</strong><br />
+          Stage: <strong>{API_STAGE}</strong>
+          <br />
           {apiStatus}
-          {sessionId ? <><br />Session: <code>{sessionId.slice(0, 8)}…</code></> : null}
+          {sessionId ? (
+            <>
+              <br />
+              Session: <code>{sessionId.slice(0, 8)}…</code>
+            </>
+          ) : null}
         </p>
       </aside>
       <div className="main-shell">
         <main>
-          <div className="page-heading"><div><h1>{page}</h1><p>{descriptions[page]}</p></div>
+          <div className="page-heading">
+            <div>
+              <h1>{page}</h1>
+              <p>{descriptions[page]}</p>
+            </div>
             <div className="page-actions">
-            {page === 'Vault' && <button className="danger" disabled={!active.mappings.length} onClick={() => { void changeMappings([]) }}>Reset vault</button>}
-              <button className="theme-button" onClick={() => setLight(!light)} aria-label={`Switch to ${light ? 'dark' : 'light'} theme`}>
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 1v2m0 18v2M1 12h2m18 0h2M4 4l2 2m12 12 2 2M4 20l2-2M18 6l2-2" /></svg>
-        </button>
-            </div>
-          </div>
-          <div className="document-tabs" role="group" aria-label="Documents">
-            {documents.map((doc) => (
-              <div key={doc.id} className={`document-tab${doc.id === activeId ? ' active' : ''}${confirmDeleteId === doc.id ? ' confirming' : ''}`}>
+              {page === 'Vault' && (
                 <button
-                  className="document-tab-label"
-                  aria-pressed={doc.id === activeId}
-                  onClick={() => { setActiveId(doc.id); setNotice(''); setConfirmDeleteId(null) }}
-                >
-                  {doc.name}
-                </button>
-                <button
-                  type="button"
-                  className="document-tab-close"
-                  aria-label={confirmDeleteId === doc.id ? `Confirm delete ${doc.name}` : `Delete ${doc.name}`}
-                  title={confirmDeleteId === doc.id ? 'Click again to confirm delete' : 'Delete document'}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (confirmDeleteId === doc.id) deleteDocument(doc.id)
-                    else requestDeleteDocument(doc.id)
+                  className="danger"
+                  disabled={!active.mappings.length}
+                  onClick={() => {
+                    void changeMappings([])
                   }}
                 >
-                  ×
+                  Reset vault
                 </button>
-                {confirmDeleteId === doc.id && <span className="document-tab-flash" role="status">Delete?</span>}
-              </div>
-            ))}
-            <button className="new-document" onClick={addDocument}>+ New document</button>
-          </div>
-
-          {page !== 'Vault' && <>
-            <div className="editors">
-              <section className="editor">
-                <div className="editor-heading">
-                  <label htmlFor="source-input">Input</label>
-                  <div>
-                    <button className="quiet" onClick={() => fileInput.current?.click()}>Upload file</button>
-                    <button className="quiet" onClick={() => {
-                      updateDocument(activeId, encoding
-                        ? { input: sampleText, name: 'onboarding-dossier.txt', output: '' }
-                        : { reply: sampleReply, restored: '', unknown: [] })
-                      setNotice('Example loaded.')
-                    }}>Use example</button>
-                    <input ref={fileInput} type="file" accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="sr-only" tabIndex={-1} aria-label="Upload text, PDF, or DOCX file" onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = '' }} />
-                  </div>
-                </div>
-                <textarea
-                  id="source-input"
-                  value={input}
-                  onChange={(e) => {
-                    updateDocument(activeId, encoding
-                      ? { input: e.target.value, output: '' }
-                      : { reply: e.target.value, restored: '', unknown: [] })
-                    setNotice('')
-                  }}
-                  placeholder={encoding ? 'Paste text here or upload a file…' : 'Paste text with tokens here or upload a file…'}
-                  spellCheck={false}
-                />
-              </section>
-              <section className="editor">
-                <div className="editor-heading">
-                  <h2 id="output-label">Output</h2>
-                  <button className="quiet" disabled={!output} onClick={() => copy(output)}>Copy</button>
-                </div>
-                <pre className="output" tabIndex={0} aria-labelledby="output-label">{output
-                  ? encoding ? <TokenText text={output} mappings={active.mappings} /> : output
-                  : <span className="placeholder">{encoding ? 'Run Encode to see tokenized output.' : 'Run Decode to see restored text.'}</span>}</pre>
-              </section>
-            </div>
-            <div className="actions">
-              <button className="primary" disabled={!input.trim() || busy} onClick={() => void (encoding ? encode() : decode())}>
-                {busy ? 'Working…' : page}
+              )}
+              <button
+                className="theme-button"
+                onClick={() => setLight(!light)}
+                aria-label={`Switch to ${light ? 'dark' : 'light'} theme`}
+              >
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4" />
+                  <path d="M12 1v2m0 18v2M1 12h2m18 0h2M4 4l2 2m12 12 2 2M4 20l2-2M18 6l2-2" />
+                </svg>
               </button>
-              <button className="secondary" onClick={() => navigate('Vault')}>Inspect PII</button>
             </div>
-            {!encoding && !!active.unknown.length && <p className="warning" role="alert">Unknown tokens left unchanged: {active.unknown.join(', ')}</p>}
-          </>}
+          </div>
 
-          {page === 'Vault' && <Vault key={activeId} mappings={active.mappings} onChange={(next) => {
-            void changeMappings(next)
-          }} onAdd={() => {
-            const mapping = { token: `Custom_${active.nextToken}`, value: 'new value', category: 'Custom', firstOffset: 0 }
-            void changeMappings([...active.mappings, mapping])
-            updateDocument(activeId, { nextToken: active.nextToken + 1 })
-          }} />}
-          <p className="status" role="status">{notice}</p>
+          <DocumentTabs
+            documents={tabDocs}
+            activeId={active.id}
+            onSelect={(id) => {
+              if (page === 'Vault') setActiveVault(id)
+              else setActiveEncode(id)
+              setNotice('')
+              setDraftToken(null)
+            }}
+            onClose={closeDocument}
+            onAdd={addDocument}
+          />
+
+          {page !== 'Vault' && (
+            <>
+              <div className="editors">
+                <section className="editor">
+                  <div className="editor-heading">
+                    <label htmlFor="source-input">Input</label>
+                    <div>
+                      <button className="quiet" onClick={() => fileInput.current?.click()}>
+                        Upload file
+                      </button>
+                      <button
+                        className="quiet"
+                        onClick={() => {
+                          updateDocument(
+                            active.id,
+                            encoding
+                              ? { input: sampleText, name: 'onboarding-dossier.txt', output: '' }
+                              : { reply: sampleReply, restored: '', unknown: [] }
+                          )
+                          setNotice('Example loaded.')
+                        }}
+                      >
+                        Use example
+                      </button>
+                      <input
+                        ref={fileInput}
+                        type="file"
+                        accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        className="sr-only"
+                        tabIndex={-1}
+                        aria-label="Upload text, PDF, or DOCX file"
+                        onChange={(e) => {
+                          void upload(e.target.files?.[0])
+                          e.target.value = ''
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <textarea
+                    id="source-input"
+                    ref={inputRef}
+                    value={input}
+                    onChange={(e) => {
+                      updateDocument(
+                        active.id,
+                        encoding ? { input: e.target.value, output: '' } : { reply: e.target.value, restored: '', unknown: [] }
+                      )
+                      setNotice('')
+                    }}
+                    onClick={handleInputClick}
+                    placeholder={
+                      encoding
+                        ? 'Paste text here or click a word to draft a token…'
+                        : 'Paste text with tokens here or upload a file…'
+                    }
+                    spellCheck={false}
+                  />
+                </section>
+                <section className="editor">
+                  <div className="editor-heading">
+                    <h2 id="output-label">Output</h2>
+                    <button className="quiet" disabled={!output} onClick={() => copy(output)}>
+                      Copy
+                    </button>
+                  </div>
+                  <pre className="output" tabIndex={0} aria-labelledby="output-label">
+                    {output ? (
+                      encoding ? (
+                        <TokenText text={output} mappings={active.mappings} />
+                      ) : (
+                        output
+                      )
+                    ) : (
+                      <span className="placeholder">
+                        {encoding ? 'Run Encode to see tokenized output.' : 'Run Decode to see restored text.'}
+                      </span>
+                    )}
+                  </pre>
+                </section>
+              </div>
+              <div className="actions">
+                <button
+                  className="primary"
+                  disabled={!input.trim() || busy}
+                  onClick={() => void (encoding ? encode() : decode())}
+                >
+                  {busy ? 'Working…' : page}
+                </button>
+                <button className="secondary" onClick={() => jumpTo('Vault')}>
+                  Inspect PII
+                </button>
+              </div>
+              {!encoding && !!active.unknown.length && (
+                <p className="warning" role="alert">
+                  Unknown tokens left unchanged: {active.unknown.join(', ')}
+                </p>
+              )}
+            </>
+          )}
+
+          {page === 'Vault' && (
+            <>
+              {draftToken && (
+                <div className="draft-token" role="region" aria-label="New token">
+                  <strong>New token</strong>
+                  <input
+                    aria-label="Token value"
+                    value={draftToken.value}
+                    onChange={(e) => setDraftToken({ ...draftToken, value: e.target.value })}
+                  />
+                  <select
+                    aria-label="Token class"
+                    value={draftToken.cls}
+                    onChange={(e) => setDraftToken({ ...draftToken, cls: e.target.value })}
+                  >
+                    {CLASS_OPTIONS.map((c) => (
+                      <option key={c}>{c}</option>
+                    ))}
+                  </select>
+                  <button className="primary" onClick={commitDraftToken}>
+                    Save
+                  </button>
+                  <button className="quiet" onClick={() => setDraftToken(null)}>
+                    Cancel
+                  </button>
+                </div>
+              )}
+              <Vault
+                key={active.id}
+                mappings={active.mappings}
+                onChange={(next) => {
+                  void changeMappings(next)
+                }}
+                onAdd={() => {
+                  const cls = 'Custom'
+                  const n = nextCounter(active.nextIdx, cls)
+                  const mapping: Mapping = {
+                    token: `${cls}_${n}`,
+                    value: 'new value',
+                    category: cls,
+                    firstOffset: 0,
+                  }
+                  updateDocument(active.id, { nextIdx: bumpCounter(active.nextIdx, cls) })
+                  void changeMappings([...active.mappings, mapping])
+                }}
+              />
+            </>
+          )}
+          <p className="status" role="status">
+            {notice}
+          </p>
         </main>
       </div>
     </div>

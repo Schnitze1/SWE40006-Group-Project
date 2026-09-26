@@ -1,5 +1,6 @@
 //! AWS Lambda HTTP handler for pii-core (local code only — deploy is CI's job).
 mod session;
+mod storage;
 
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use serde::Serialize;
@@ -8,6 +9,7 @@ use std::time::Instant;
 
 use poco_core::vault::{TokenMapping, Vault};
 use session::{category_of, delete_mapping, delete_session, load_mappings, store_mappings, upsert_mapping};
+use storage::{put_text, put_upload};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,6 +213,9 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
                 return json_response(400, b);
             }
         };
+        // Best-effort archive (non-fatal).
+        let session_for_s3 = uuid::Uuid::new_v4().to_string();
+        let _ = put_upload(&session_for_s3, &file_name, bytes).await;
         let out = json!({ "fileName": file_name, "text": text });
         let body = out.to_string();
         return json_response(200, body);
@@ -283,6 +288,12 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
             let b = err_body(&e);
             return json_response(500, b);
         }
+        // Best-effort S3 archive of redacted text (non-fatal).
+        let archive_name = parsed
+            .get("fileName")
+            .and_then(|t| t.as_str())
+            .unwrap_or("encode.txt");
+        let _ = put_text(&session_id, archive_name, &encoded.redacted_text).await;
         let mappings: Vec<MappingOut> = encoded.mappings.iter().map(mapping_out).collect();
         let total_entities = mappings.len();
         let duration_ms = started.elapsed().as_millis();

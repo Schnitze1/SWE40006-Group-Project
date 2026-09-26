@@ -16,3 +16,4 @@ uuid = { version = "1", features = ["v4"] }
 poco-core = { path = "../core", package = "pii-core" }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
+aws-sdk-s3 = "1"
