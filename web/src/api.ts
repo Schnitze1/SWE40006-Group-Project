@@ -53,11 +53,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 export async function encodeText(
   sessionId: string | null,
   text: string,
-  file?: { fileName: string; fileBase64: string }
+  file?: { fileName: string; fileBase64?: string; s3Key?: string }
 ): Promise<EncodeResult> {
   const body: Record<string, unknown> = {}
   if (sessionId) body.sessionId = sessionId
-  if (file) {
+  if (file?.s3Key) {
+    body.fileName = file.fileName
+    body.s3Key = file.s3Key
+  } else if (file?.fileBase64) {
     body.fileName = file.fileName
     body.fileBase64 = file.fileBase64
   } else {
@@ -68,9 +71,10 @@ export async function encodeText(
 
 export async function extractFile(
   fileName: string,
-  fileBase64: string
+  opts: { fileBase64?: string; s3Key?: string }
 ): Promise<{ fileName: string; text: string }> {
-  return post('/extract', { fileName, fileBase64 })
+  if (opts.s3Key) return post('/extract', { fileName, s3Key: opts.s3Key })
+  return post('/extract', { fileName, fileBase64: opts.fileBase64 })
 }
 
 export function fileToBase64(file: File): Promise<string> {
@@ -88,6 +92,30 @@ export function fileToBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('Could not read file'))
     reader.readAsDataURL(file)
   })
+}
+
+/** Ask Lambda for a presigned PUT URL (bypasses API 6MB payload cap). */
+export async function presignUpload(
+  fileName: string,
+  contentType: string,
+  sessionId?: string | null
+): Promise<{ sessionId: string; key: string; uploadUrl: string }> {
+  const body: Record<string, unknown> = { fileName, contentType }
+  if (sessionId) body.sessionId = sessionId
+  return post('/presign', body)
+}
+
+/** Browser → S3 PUT (no API Gateway size limit). */
+export async function uploadToS3(uploadUrl: string, file: Blob, contentType: string): Promise<void> {
+  const res = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': contentType },
+    body: file,
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || `S3 upload HTTP ${res.status}`)
+  }
 }
 
 export async function decodeText(sessionId: string, text: string): Promise<DecodeResult> {

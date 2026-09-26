@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use poco_core::vault::{TokenMapping, Vault};
 use session::{category_of, delete_mapping, delete_session, load_mappings, store_mappings, upsert_mapping};
-use storage::{put_text, put_upload};
+use storage::{get_bytes, presign_upload, put_text, put_upload};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,6 +172,49 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
         return json_response(200, body);
     }
 
+    if method == "POST" && segment == "presign" {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                let b = err_body("invalid json");
+                return json_response(400, b);
+            }
+        };
+        let file_name = match parsed.get("fileName").and_then(|t| t.as_str()) {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => {
+                let b = err_body("fileName is required");
+                return json_response(400, b);
+            }
+        };
+        let session_id = parsed
+            .get("sessionId")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let content_type = parsed
+            .get("contentType")
+            .and_then(|t| t.as_str())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let signed = presign_upload(&session_id, &file_name, &content_type).await;
+        let (key, upload_url) = match signed {
+            Ok(pair) => pair,
+            Err(e) => {
+                let b = err_body(&e);
+                return json_response(500, b);
+            }
+        };
+        let out = json!({
+            "sessionId": session_id,
+            "key": key,
+            "uploadUrl": upload_url
+        });
+        let body = out.to_string();
+        return json_response(200, body);
+    }
+
     if method == "POST" && segment == "extract" {
         let parsed: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -187,24 +230,40 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
                 return json_response(400, b);
             }
         };
-        let b64 = match parsed.get("fileBase64").and_then(|t| t.as_str()) {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => {
-                let b = err_body("fileBase64 is required");
-                return json_response(400, b);
+        let s3_key = parsed
+            .get("s3Key")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let bytes = if !s3_key.is_empty() {
+            let got = get_bytes(&s3_key).await;
+            match got {
+                Ok(b) if !b.is_empty() => b,
+                Ok(_) => {
+                    let b = err_body("uploaded file is empty");
+                    return json_response(400, b);
+                }
+                Err(e) => {
+                    let b = err_body(&e);
+                    return json_response(500, b);
+                }
+            }
+        } else {
+            let b64 = match parsed.get("fileBase64").and_then(|t| t.as_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => {
+                    let b = err_body("fileBase64 or s3Key is required");
+                    return json_response(400, b);
+                }
+            };
+            match base64_decode(&b64) {
+                Some(b) if !b.is_empty() => b,
+                _ => {
+                    let b = err_body("fileBase64 is not valid base64");
+                    return json_response(400, b);
+                }
             }
         };
-        let bytes = match base64_decode(&b64) {
-            Some(b) => b,
-            None => {
-                let b = err_body("fileBase64 is not valid base64");
-                return json_response(400, b);
-            }
-        };
-        if bytes.is_empty() {
-            let b = err_body("uploaded file is empty");
-            return json_response(400, b);
-        }
         let text = match poco_core::extract::extract_text_from_bytes(&file_name, &bytes) {
             Ok(t) => t,
             Err(e) => {
@@ -236,8 +295,31 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
         };
         if text.is_empty() {
             let file_name = parsed.get("fileName").and_then(|t| t.as_str()).unwrap_or("");
+            let s3_key = parsed.get("s3Key").and_then(|t| t.as_str()).unwrap_or("");
             let b64 = parsed.get("fileBase64").and_then(|t| t.as_str()).unwrap_or("");
-            if !file_name.is_empty() && !b64.is_empty() {
+            if !file_name.is_empty() && !s3_key.is_empty() {
+                let got = get_bytes(s3_key).await;
+                let bytes = match got {
+                    Ok(b) if !b.is_empty() => b,
+                    Ok(_) => {
+                        let b = err_body("uploaded file is empty");
+                        return json_response(400, b);
+                    }
+                    Err(e) => {
+                        let b = err_body(&e);
+                        return json_response(500, b);
+                    }
+                };
+                let extracted = poco_core::extract::extract_text_from_bytes(file_name, &bytes);
+                text = match extracted {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let msg = format!("{e:?}");
+                        let b = err_body(&msg);
+                        return json_response(400, b);
+                    }
+                };
+            } else if !file_name.is_empty() && !b64.is_empty() {
                 let decoded = base64_decode(b64);
                 let bytes = match decoded {
                     Some(b) if !b.is_empty() => b,

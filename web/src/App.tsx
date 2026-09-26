@@ -6,11 +6,13 @@ import {
   deleteMapping,
   encodeText,
   extractFile,
-  fileToBase64,
+  presignUpload,
+  uploadToS3,
   health,
   upsertMapping,
   API_STAGE,
 } from './api'
+import type { DocTab } from './types'
 import { DocumentTabs } from './components/DocumentTabs'
 import { Vault } from './components/Vault'
 import './App.css'
@@ -20,23 +22,13 @@ type Page = 'Encode' | 'Decode' | 'Vault'
 type Document = {
   id: number
   name: string
-  /** raw source / LLM reply text for the active editor */
   input: string
   reply: string
   output: string
   restored: string
   unknown: string[]
   mappings: Mapping[]
-  /** next free counter per token class, e.g. { Name: 3, Email: 1 } */
   nextIdx: Record<string, number>
-}
-
-function nextCounter(map: Record<string, number>, cls: string): number {
-  return map[cls] ?? 1
-}
-
-function bumpCounter(map: Record<string, number>, cls: string): Record<string, number> {
-  return { ...map, [cls]: (map[cls] ?? 1) + 1 }
 }
 
 function newDocument(id: number, name?: string): Document {
@@ -100,13 +92,11 @@ function TokenText({ text, mappings }: { text: string; mappings: Mapping[] }) {
   })
 }
 
-/** Word under the caret/selection in a textarea. */
 function wordAtSelection(textarea: HTMLTextAreaElement): string {
   const text = textarea.value
   let start = textarea.selectionStart
   let end = textarea.selectionEnd
   if (start === end) {
-    // expand around caret
     while (start > 0 && /[\p{L}\p{N}'’@._+-]/u.test(text[start - 1] ?? '')) start -= 1
     while (end < text.length && /[\p{L}\p{N}'’@._+-]/u.test(text[end] ?? '')) end += 1
   }
@@ -126,8 +116,9 @@ function guessClass(word: string): string {
 function App() {
   const [page, setPage] = useState<Page>('Encode')
   const [light, setLight] = useState(false)
+  /** 1. One shared documents array — single source of truth. */
   const [documents, setDocuments] = useState<Document[]>(() => [newDocument(1)])
-  /** Independent active-doc pointers per view (spec). */
+  /** 2. Two independent active-id pointers, one per view. */
   const [activeEncode, setActiveEncode] = useState(1)
   const [activeVault, setActiveVault] = useState(1)
   const [notice, setNotice] = useState('')
@@ -137,6 +128,7 @@ function App() {
   const [draftToken, setDraftToken] = useState<{ value: string; cls: string } | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  /** 3. Naming counter only — never used as an id. */
   const docCounter = useRef(1)
 
   const encoding = page === 'Encode'
@@ -151,7 +143,7 @@ function App() {
       .catch(() => setApiStatus('API offline'))
   }, [])
 
-  const tabDocs = useMemo(() => documents.map((d) => ({ id: d.id, name: d.name })), [documents])
+  const tabDocs: DocTab[] = useMemo(() => documents.map((d) => ({ id: d.id, name: d.name })), [documents])
 
   function updateDocument(id: number, changes: Partial<Document>) {
     setDocuments((previous) => previous.map((doc) => (doc.id === id ? { ...doc, ...changes } : doc)))
@@ -163,13 +155,14 @@ function App() {
     setDraftToken(null)
   }
 
-  /** Jump to related view keeping the same document (spec). */
+  /** Jump keeps the same document scoped in the destination view. */
   function jumpTo(target: Page) {
     if (target === 'Vault') setActiveVault(activeEncode)
-    else if (target === 'Encode' || target === 'Decode') setActiveEncode(activeVault)
+    else setActiveEncode(activeVault)
     navigate(target)
   }
 
+  /** 4. Close reconciles BOTH views' active ids. × is only rendered when length > 1. */
   function closeDocument(id: number) {
     if (documents.length <= 1) return
     const remaining = documents.filter((doc) => doc.id !== id)
@@ -180,6 +173,7 @@ function App() {
     setDraftToken(null)
   }
 
+  /** Add: new empty doc; both views jump to it. */
   function addDocument() {
     docCounter.current += 1
     const id = Date.now() + docCounter.current
@@ -274,7 +268,6 @@ function App() {
     setNotice(sessionId ? 'Vault updated on the server.' : 'Local vault updated. Encode first to persist.')
   }
 
-  /** Create a token from a word the user clicked in the input. */
   function addTokenFromWord(word: string) {
     const cls = guessClass(word)
     setDraftToken({ value: word, cls })
@@ -286,7 +279,7 @@ function App() {
   function commitDraftToken() {
     if (!draftToken) return
     const cls = draftToken.cls
-    const n = nextCounter(active.nextIdx, cls)
+    const n = active.nextIdx[cls] ?? 1
     const token = `${cls}_${n}`
     const mapping: Mapping = {
       token,
@@ -294,20 +287,24 @@ function App() {
       category: cls,
       firstOffset: active.input.indexOf(draftToken.value),
     }
-    const nextMappings = [...active.mappings, mapping]
-    updateDocument(active.id, { nextIdx: bumpCounter(active.nextIdx, cls) })
-    void changeMappings(nextMappings)
+    updateDocument(active.id, { nextIdx: { ...active.nextIdx, [cls]: n + 1 } })
+    void changeMappings([...active.mappings, mapping])
     setDraftToken(null)
   }
 
+  /**
+   * 5. Upload writes only to the active document.
+   * PDF/DOCX go browser → S3 (presigned PUT) then extract via s3Key —
+   * this is what fixes HTTP 413 on multi-page PDFs.
+   */
   async function upload(file?: File) {
     if (!file) return
     if (!/\.(txt|md|pdf|docx)$/i.test(file.name)) {
       setNotice('Choose a .txt, .md, .pdf, or .docx file.')
       return
     }
-    if (file.size > 12_000_000) {
-      setNotice('Choose a file smaller than 12 MB.')
+    if (file.size > 25_000_000) {
+      setNotice('Choose a file smaller than 25 MB.')
       return
     }
     const documentId = active.id
@@ -316,17 +313,17 @@ function App() {
       const isBinary = /\.(pdf|docx)$/i.test(file.name)
       let text = ''
       if (isBinary) {
-        const fileBase64 = await fileToBase64(file)
-        // Guard API Gateway / Lambda payload cap (~6MB usable). Large PDFs 413.
-        if (fileBase64.length > 4_500_000) {
-          setNotice(
-            'File is too large to send to the API after base64 encoding (HTTP 413). Try a smaller PDF or paste extracted text.'
-          )
-          return
+        const contentType =
+          file.type || (isBinary && /\.pdf$/i.test(file.name) ? 'application/pdf' : 'application/octet-stream')
+        const pre = await presignUpload(file.name, contentType, sessionId)
+        if (pre.sessionId) {
+          saveSessionId(pre.sessionId)
+          setSessionId(pre.sessionId)
         }
-        const extracted = await extractFile(file.name, fileBase64)
+        await uploadToS3(pre.uploadUrl, file, contentType)
+        const extracted = await extractFile(file.name, { s3Key: pre.key })
         text = extracted.text
-        setNotice(`Extracted ${text.length} characters from ${file.name}.`)
+        setNotice(`Uploaded to S3 and extracted ${text.length} characters from ${file.name}.`)
       } else {
         text = await file.text()
         setNotice(`File loaded. Ready to ${encoding ? 'encode' : 'decode'}.`)
@@ -336,12 +333,7 @@ function App() {
         encoding ? { name: file.name, input: text, output: '' } : { reply: text, restored: '', unknown: [] }
       )
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (/413|too large/i.test(msg)) {
-        setNotice('Upload failed: file too large for the API (HTTP 413). Compress the PDF or paste text instead.')
-      } else {
-        setNotice(`Upload failed: ${msg}`)
-      }
+      setNotice(`Upload failed: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy(false)
     }
@@ -364,9 +356,9 @@ function App() {
   }
 
   const descriptions = {
-    Encode: 'Replace sensitive information with tokens via the API. Click a word in the input to draft a token.',
+    Encode: 'Replace sensitive information with tokens. Click a word in the input to draft a token.',
     Decode: 'Restore tokens using the server session vault.',
-    Vault: 'Inspect and edit mappings. Close tabs only when more than one document is open.',
+    Vault: 'Inspect and edit mappings for the active document.',
   }
 
   return (
@@ -446,6 +438,7 @@ function App() {
             </div>
           </div>
 
+          {/* Shared strip: each view passes its own activeId + switch callback */}
           <DocumentTabs
             documents={tabDocs}
             activeId={active.id}
@@ -594,14 +587,14 @@ function App() {
                 }}
                 onAdd={() => {
                   const cls = 'Custom'
-                  const n = nextCounter(active.nextIdx, cls)
+                  const n = active.nextIdx[cls] ?? 1
                   const mapping: Mapping = {
                     token: `${cls}_${n}`,
                     value: 'new value',
                     category: cls,
                     firstOffset: 0,
                   }
-                  updateDocument(active.id, { nextIdx: bumpCounter(active.nextIdx, cls) })
+                  updateDocument(active.id, { nextIdx: { ...active.nextIdx, [cls]: n + 1 } })
                   void changeMappings([...active.mappings, mapping])
                 }}
               />

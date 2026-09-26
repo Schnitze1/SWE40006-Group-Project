@@ -1,71 +1,57 @@
-import { useState } from 'react'
-
-export type DocTab = {
-  id: number
-  name: string
-}
+import type { DocTab } from '../types'
 
 type Props = {
   documents: DocTab[]
   activeId: number
   onSelect: (id: number) => void
+  /** Close is never shown when documents.length === 1. */
   onClose: (id: number) => void
   onAdd: () => void
 }
 
-/** Shared tab strip for Encode and Vault. Close is hidden when only one doc. */
+/**
+ * Shared tab strip (one implementation for Encode and Vault).
+ * Close (×) only renders when more than one document exists.
+ */
 export function DocumentTabs({ documents, activeId, onSelect, onClose, onAdd }: Props) {
-  const [confirmId, setConfirmId] = useState<number | null>(null)
   const canClose = documents.length > 1
 
   return (
-    <div className="document-tabs" role="group" aria-label="Documents">
+    <div className="doctabs" role="group" aria-label="Documents">
       {documents.map((doc) => (
         <div
           key={doc.id}
-          className={`document-tab${doc.id === activeId ? ' active' : ''}${confirmId === doc.id ? ' confirming' : ''}`}
+          className={`doctab${doc.id === activeId ? ' active' : ''}`}
+          onClick={(e) => {
+            // Case 1: click landed on the close control.
+            const target = e.target as HTMLElement
+            if (target.dataset.del) {
+              e.stopPropagation()
+              onClose(doc.id)
+              return
+            }
+            // Case 2: normal tab click — switch this view only.
+            onSelect(doc.id)
+          }}
         >
-          <button
-            type="button"
-            className="document-tab-label"
-            aria-pressed={doc.id === activeId}
-            onClick={() => {
-              setConfirmId(null)
-              onSelect(doc.id)
-            }}
-          >
-            {doc.name}
-          </button>
+          <span className="doctab-name">{doc.name}</span>
           {canClose && (
-            <button
-              type="button"
-              className="document-tab-close"
-              aria-label={confirmId === doc.id ? `Confirm close ${doc.name}` : `Close ${doc.name}`}
-              title={confirmId === doc.id ? 'Click again to close' : 'Close document'}
-              onClick={(e) => {
-                e.stopPropagation()
-                if (confirmId === doc.id) {
-                  setConfirmId(null)
-                  onClose(doc.id)
-                } else {
-                  setConfirmId(doc.id)
-                  window.setTimeout(() => setConfirmId((cur) => (cur === doc.id ? null : cur)), 3000)
-                }
-              }}
+            <span
+              className="doctab-x"
+              data-del={doc.id}
+              role="button"
+              aria-label={`Close ${doc.name}`}
+              title="Close document"
             >
               ×
-            </button>
-          )}
-          {confirmId === doc.id && (
-            <span className="document-tab-flash" role="status">
-              Close?
             </span>
           )}
         </div>
       ))}
-      <button type="button" className="new-document" onClick={onAdd}>
+      <div className="doctab add" onClick={onAdd} role="button" tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onAdd() } }}>
         + New document
-      </button>
+      </div>
     </div>
   )
 }
