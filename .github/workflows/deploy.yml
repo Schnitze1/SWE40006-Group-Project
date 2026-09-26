@@ -101,6 +101,9 @@ jobs:
             exit 1
           fi
           ls -la "$ZIP"
+          SIZE=$(stat -c%s "$ZIP")
+          echo "zip size bytes: $SIZE"
+          aws sts get-caller-identity
           aws lambda update-function-code \
             --function-name ${{ steps.env.outputs.lambda }} \
             --zip-file fileb://$ZIP \
