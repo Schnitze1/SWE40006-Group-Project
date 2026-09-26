@@ -128,6 +128,25 @@ export async function health(): Promise<{ status: string; version: string; env: 
   return res.json()
 }
 
+export async function listMappings(sessionId: string): Promise<{ sessionId: string; mappings: Mapping[] }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/mappings`)
+  const text = await res.text()
+  let data: unknown = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    throw new Error(text || `HTTP ${res.status}`)
+  }
+  if (!res.ok) {
+    const msg =
+      data && typeof data === 'object' && 'error' in data
+        ? String((data as { error: unknown }).error)
+        : `HTTP ${res.status}`
+    throw new Error(msg)
+  }
+  return data as { sessionId: string; mappings: Mapping[] }
+}
+
 export async function upsertMapping(
   sessionId: string,
   mapping: { token: string; value: string; category?: string }

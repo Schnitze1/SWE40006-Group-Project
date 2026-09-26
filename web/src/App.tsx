@@ -8,13 +8,16 @@ import {
   extractFile,
   fileToBase64,
   health,
+  listMappings,
   upsertMapping,
   API_STAGE,
 } from './api'
 import { extractPdfText } from './pdfExtract'
+import { loadWorkspace, saveWorkspace, loadSession, saveSession } from './persist'
 import type { DocTab } from './types'
 import { DocumentTabs } from './components/DocumentTabs'
 import { Vault } from './components/Vault'
+import { WordPicker } from './components/WordPicker'
 import './App.css'
 
 type Page = 'Encode' | 'Decode' | 'Vault'
@@ -46,19 +49,11 @@ function newDocument(id: number, name?: string): Document {
 }
 
 function loadSessionId(): string | null {
-  try {
-    return window.localStorage.getItem('poco.sessionId')
-  } catch {
-    return null
-  }
+  return loadSession()
 }
 
 function saveSessionId(id: string) {
-  try {
-    window.localStorage.setItem('poco.sessionId', id)
-  } catch {
-    /* ignore */
-  }
+  saveSession(id)
 }
 
 function NavIcon({ page }: { page: Page }) {
@@ -114,13 +109,14 @@ function guessClass(word: string): string {
 }
 
 function App() {
+  const restored = useRef(loadWorkspace()).current
   const [page, setPage] = useState<Page>('Encode')
   const [light, setLight] = useState(false)
   /** 1. One shared documents array — single source of truth. */
-  const [documents, setDocuments] = useState<Document[]>(() => [newDocument(1)])
+  const [documents, setDocuments] = useState<Document[]>(() => restored?.documents ?? [newDocument(1)])
   /** 2. Two independent active-id pointers, one per view. */
-  const [activeEncode, setActiveEncode] = useState(1)
-  const [activeVault, setActiveVault] = useState(1)
+  const [activeEncode, setActiveEncode] = useState(restored?.activeEncode ?? 1)
+  const [activeVault, setActiveVault] = useState(restored?.activeVault ?? 1)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [apiStatus, setApiStatus] = useState<string>('checking…')
@@ -129,7 +125,7 @@ function App() {
   const fileInput = useRef<HTMLInputElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   /** 3. Naming counter only — never used as an id. */
-  const docCounter = useRef(1)
+  const docCounter = useRef(restored?.docCounter ?? 1)
 
   const encoding = page === 'Encode'
   const activeViewId = page === 'Vault' ? activeVault : activeEncode
@@ -137,10 +133,35 @@ function App() {
   const input = encoding ? active.input : active.reply
   const output = encoding ? active.output : active.restored
 
+  // Persist workspace (documents + view pointers + session) on every change.
+  useEffect(() => {
+    saveWorkspace({
+      documents,
+      activeEncode,
+      activeVault,
+      sessionId,
+      docCounter: docCounter.current,
+    })
+  }, [documents, activeEncode, activeVault, sessionId])
+
   useEffect(() => {
     health()
       .then((h) => setApiStatus(`API ${h.env} · v${h.version}`))
       .catch(() => setApiStatus('API offline'))
+    // Re-hydrate mappings from the server session so a refresh keeps the vault.
+    const sid = loadSessionId()
+    if (sid) {
+      listMappings(sid)
+        .then((res) => {
+          setDocuments((prev) => {
+            if (prev.some((d) => d.mappings.length > 0)) return prev
+            return prev.map((d, i) => (i === 0 ? { ...d, mappings: res.mappings } : d))
+          })
+        })
+        .catch(() => {
+          /* session may have expired */
+        })
+    }
   }, [])
 
   const tabDocs: DocTab[] = useMemo(() => documents.map((d) => ({ id: d.id, name: d.name })), [documents])
@@ -343,13 +364,6 @@ function App() {
     }
   }
 
-  function handleInputClick() {
-    const el = inputRef.current
-    if (!el || !encoding) return
-    const word = wordAtSelection(el)
-    if (word && word.length >= 2) addTokenFromWord(word)
-  }
-
   const descriptions = {
     Encode: 'Replace sensitive information with tokens. Click a word in the input to draft a token.',
     Decode: 'Restore tokens using the server session vault.',
@@ -485,25 +499,37 @@ function App() {
                       />
                     </div>
                   </div>
-                  <textarea
-                    id="source-input"
-                    ref={inputRef}
-                    value={input}
-                    onChange={(e) => {
-                      updateDocument(
-                        active.id,
-                        encoding ? { input: e.target.value, output: '' } : { reply: e.target.value, restored: '', unknown: [] }
-                      )
-                      setNotice('')
-                    }}
-                    onClick={handleInputClick}
-                    placeholder={
-                      encoding
-                        ? 'Paste text here or click a word to draft a token…'
-                        : 'Paste text with tokens here or upload a file…'
-                    }
-                    spellCheck={false}
-                  />
+                  <div className="input-stack">
+                    {encoding && (
+                      <WordPicker
+                        value={input}
+                        placeholder="Hover a word and click it to draft a token…"
+                        onPick={(word) => {
+                          if (word.length >= 2) addTokenFromWord(word)
+                          else setNotice('Pick a longer word to tokenize.')
+                        }}
+                      />
+                    )}
+                    <textarea
+                      id="source-input"
+                      ref={inputRef}
+                      className={encoding ? 'input-under' : undefined}
+                      value={input}
+                      onChange={(e) => {
+                        updateDocument(
+                          active.id,
+                          encoding ? { input: e.target.value, output: '' } : { reply: e.target.value, restored: '', unknown: [] }
+                        )
+                        setNotice('')
+                      }}
+                      placeholder={
+                        encoding
+                          ? 'Type here — hover a word above and click it to draft a token…'
+                          : 'Paste text with tokens here or upload a file…'
+                      }
+                      spellCheck={false}
+                    />
+                  </div>
                 </section>
                 <section className="editor">
                   <div className="editor-heading">
@@ -535,7 +561,18 @@ function App() {
                 >
                   {busy ? 'Working…' : page}
                 </button>
-                <button className="secondary" onClick={() => jumpTo('Vault')}>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    const el = inputRef.current
+                    const word = el ? wordAtSelection(el) : ''
+                    if (encoding && word.length >= 2) {
+                      addTokenFromWord(word)
+                      return
+                    }
+                    jumpTo('Vault')
+                  }}
+                >
                   Inspect PII
                 </button>
               </div>

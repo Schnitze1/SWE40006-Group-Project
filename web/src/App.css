@@ -171,3 +171,32 @@ td input { width: 100%; }
  .quiet { min-height: 34px; }
  .row-actions { gap: 8px; }
 }
+
+.input-stack { position: relative; }
+.input-stack textarea.input-under {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+}
+.input-stack textarea.input-under::placeholder {
+  color: var(--muted);
+}
+.word-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  font: 13px/1.9 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.word-picker.empty { color: var(--muted); }
+.word-pick { border-radius: 3px; cursor: pointer; }
+.word-pick:hover { background: #6c8cff; color: #fff; }
+.word-space { white-space: pre-wrap; }
