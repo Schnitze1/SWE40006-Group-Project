@@ -6,12 +6,12 @@ import {
   deleteMapping,
   encodeText,
   extractFile,
-  presignUpload,
-  uploadToS3,
+  fileToBase64,
   health,
   upsertMapping,
   API_STAGE,
 } from './api'
+import { extractPdfText } from './pdfExtract'
 import type { DocTab } from './types'
 import { DocumentTabs } from './components/DocumentTabs'
 import { Vault } from './components/Vault'
@@ -294,8 +294,8 @@ function App() {
 
   /**
    * 5. Upload writes only to the active document.
-   * PDF/DOCX go browser → S3 (presigned PUT) then extract via s3Key —
-   * this is what fixes HTTP 413 on multi-page PDFs.
+   * PDF text is extracted in the browser (avoids HTTP 413 on large PDFs).
+   * DOCX still goes through /extract (base64) — those files are much smaller.
    */
   async function upload(file?: File) {
     if (!file) return
@@ -310,20 +310,15 @@ function App() {
     const documentId = active.id
     setBusy(true)
     try {
-      const isBinary = /\.(pdf|docx)$/i.test(file.name)
       let text = ''
-      if (isBinary) {
-        const contentType =
-          file.type || (isBinary && /\.pdf$/i.test(file.name) ? 'application/pdf' : 'application/octet-stream')
-        const pre = await presignUpload(file.name, contentType, sessionId)
-        if (pre.sessionId) {
-          saveSessionId(pre.sessionId)
-          setSessionId(pre.sessionId)
-        }
-        await uploadToS3(pre.uploadUrl, file, contentType)
-        const extracted = await extractFile(file.name, { s3Key: pre.key })
+      if (/\.pdf$/i.test(file.name)) {
+        text = await extractPdfText(file)
+        setNotice(`Extracted ${text.length} characters from ${file.name} in the browser.`)
+      } else if (/\.docx$/i.test(file.name)) {
+        const fileBase64 = await fileToBase64(file)
+        const extracted = await extractFile(file.name, { fileBase64 })
         text = extracted.text
-        setNotice(`Uploaded to S3 and extracted ${text.length} characters from ${file.name}.`)
+        setNotice(`Extracted ${text.length} characters from ${file.name}.`)
       } else {
         text = await file.text()
         setNotice(`File loaded. Ready to ${encoding ? 'encode' : 'decode'}.`)
