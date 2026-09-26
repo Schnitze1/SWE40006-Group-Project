@@ -12,6 +12,11 @@ target/
 # Demo/scratch outputs (not source)
 pii-tool/output/
 
+# Node
+web/node_modules/
+web/dist/
+*.log
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
