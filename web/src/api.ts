@@ -46,8 +46,44 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return data as T
 }
 
-export async function encodeText(sessionId: string | null, text: string): Promise<EncodeResult> {
-  return post<EncodeResult>('/encode', sessionId ? { sessionId, text } : { text })
+export async function encodeText(
+  sessionId: string | null,
+  text: string,
+  file?: { fileName: string; fileBase64: string }
+): Promise<EncodeResult> {
+  const body: Record<string, unknown> = {}
+  if (sessionId) body.sessionId = sessionId
+  if (file) {
+    body.fileName = file.fileName
+    body.fileBase64 = file.fileBase64
+  } else {
+    body.text = text
+  }
+  return post<EncodeResult>('/encode', body)
+}
+
+export async function extractFile(
+  fileName: string,
+  fileBase64: string
+): Promise<{ fileName: string; text: string }> {
+  return post('/extract', { fileName, fileBase64 })
+}
+
+export function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== 'string') {
+        reject(new Error('Could not read file'))
+        return
+      }
+      const comma = result.indexOf(',')
+      resolve(comma >= 0 ? result.slice(comma + 1) : result)
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read file'))
+    reader.readAsDataURL(file)
+  })
 }
 
 export async function decodeText(sessionId: string, text: string): Promise<DecodeResult> {

@@ -50,6 +50,46 @@ h1 { font-size: 30px; letter-spacing: -.7px; line-height: 1.2; margin: 0 0 7px; 
 .document-tabs button { flex-shrink: 0; padding: 0 0 14px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font-size: 13px; }
 .document-tabs button[aria-pressed="true"] { border-bottom-color: var(--text); color: var(--text); }
 .document-tabs button:focus-visible { outline-offset: -3px; }
+.document-tab { position: relative; display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 0 0 14px; border-bottom: 2px solid transparent; }
+.document-tab.active { border-bottom-color: var(--text); }
+.document-tab-label { padding: 0 !important; border: 0 !important; border-bottom: 0 !important; background: none; color: var(--muted); font-size: 13px; }
+.document-tab.active .document-tab-label { color: var(--text); }
+.document-tab-close {
+  display: none;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.document-tab:hover .document-tab-close,
+.document-tab.confirming .document-tab-close { display: inline-flex; align-items: center; justify-content: center; }
+.document-tab-close:hover { background: #c44; color: #fff; }
+.document-tab.confirming .document-tab-close { background: #c44; color: #fff; animation: tab-flash 0.7s ease-in-out infinite; }
+.document-tab-flash {
+  position: absolute;
+  top: -28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #c44;
+  color: #fff;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: tab-flash 0.7s ease-in-out infinite;
+  z-index: 2;
+}
+@keyframes tab-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 .editors { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; }
 .editor { min-width: 0; }
 .editor-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 29px; margin-bottom: 10px; }

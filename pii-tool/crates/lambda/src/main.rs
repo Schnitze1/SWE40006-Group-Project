@@ -58,6 +58,62 @@ fn err_body(msg: &str) -> String {
     value.to_string()
 }
 
+/// Minimal standard-base64 encoder for tests and request building.
+#[cfg(test)]
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(n >> 6) as usize & 63] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[n as usize & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Minimal standard-base64 decoder (uploads from the web UI).
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rev = [i8::MAX; 256];
+    let mut i = 0;
+    while i < 64 {
+        rev[TABLE[i] as usize] = i as i8;
+        i += 1;
+    }
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0;
+    for c in input.bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' || c == b' ' {
+            continue;
+        }
+        let val = rev[c as usize];
+        if val == i8::MAX {
+            return None;
+        }
+        buf = (buf << 6) | (val as u32 & 0x3f);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn mapping_out(m: &TokenMapping) -> MappingOut {
     MappingOut {
         token: m.class.clone(),
@@ -114,6 +170,52 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
         return json_response(200, body);
     }
 
+    if method == "POST" && segment == "extract" {
+        let parsed: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                let b = err_body("invalid json");
+                return json_response(400, b);
+            }
+        };
+        let file_name = match parsed.get("fileName").and_then(|t| t.as_str()) {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => {
+                let b = err_body("fileName is required");
+                return json_response(400, b);
+            }
+        };
+        let b64 = match parsed.get("fileBase64").and_then(|t| t.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                let b = err_body("fileBase64 is required");
+                return json_response(400, b);
+            }
+        };
+        let bytes = match base64_decode(&b64) {
+            Some(b) => b,
+            None => {
+                let b = err_body("fileBase64 is not valid base64");
+                return json_response(400, b);
+            }
+        };
+        if bytes.is_empty() {
+            let b = err_body("uploaded file is empty");
+            return json_response(400, b);
+        }
+        let text = match poco_core::extract::extract_text_from_bytes(&file_name, &bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("{e:?}");
+                let b = err_body(&msg);
+                return json_response(400, b);
+            }
+        };
+        let out = json!({ "fileName": file_name, "text": text });
+        let body = out.to_string();
+        return json_response(200, body);
+    }
+
     if method == "POST" && segment == "encode" {
         let started = Instant::now();
         let parsed: serde_json::Value = match serde_json::from_str(body) {
@@ -123,13 +225,37 @@ pub async fn route(method: &str, path: &str, body: &str) -> Response<String> {
                 return json_response(400, b);
             }
         };
-        let text = match parsed.get("text").and_then(|t| t.as_str()) {
+        let mut text = match parsed.get("text").and_then(|t| t.as_str()) {
             Some(t) => t.to_string(),
-            None => {
-                let b = err_body("text is required");
-                return json_response(400, b);
-            }
+            None => String::new(),
         };
+        if text.is_empty() {
+            let file_name = parsed.get("fileName").and_then(|t| t.as_str()).unwrap_or("");
+            let b64 = parsed.get("fileBase64").and_then(|t| t.as_str()).unwrap_or("");
+            if !file_name.is_empty() && !b64.is_empty() {
+                let decoded = base64_decode(b64);
+                let bytes = match decoded {
+                    Some(b) if !b.is_empty() => b,
+                    _ => {
+                        let b = err_body("fileBase64 is not valid base64");
+                        return json_response(400, b);
+                    }
+                };
+                let extracted = poco_core::extract::extract_text_from_bytes(file_name, &bytes);
+                text = match extracted {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let msg = format!("{e:?}");
+                        let b = err_body(&msg);
+                        return json_response(400, b);
+                    }
+                };
+            }
+        }
+        if text.is_empty() {
+            let b = err_body("text or fileBase64 is required");
+            return json_response(400, b);
+        }
         let session_id = parsed
             .get("sessionId")
             .and_then(|t| t.as_str())
@@ -507,6 +633,30 @@ mod tests {
         let body = dec.body();
         assert!(body.contains("Email_1"), "body: {body}");
         assert!(body.contains("hallucinations"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn extract_rejects_missing_file() {
+        let resp = route("POST", "/extract", r#"{"fileName":"a.pdf"}"#).await;
+        assert_eq!(resp.status().as_u16(), 400);
+        assert!(resp.body().contains("fileBase64"));
+    }
+
+    #[tokio::test]
+    async fn encode_accepts_uploaded_txt_file() {
+        let raw = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test_data/onboarding_dossier.txt"
+        ))
+        .expect("fixture txt");
+        let b64 = base64_encode(&raw);
+        let payload = format!(
+            r#"{{"fileName":"onboarding_dossier.txt","fileBase64":"{b64}"}}"#
+        );
+        let resp = route("POST", "/encode", &payload).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.body();
+        assert!(body.contains("[Email_") || body.contains("Email"), "body: {body}");
     }
 
     #[tokio::test]

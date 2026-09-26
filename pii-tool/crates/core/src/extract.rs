@@ -98,6 +98,34 @@ pub fn extract_text(file_path: &str) -> Result<String, ExtractError> {
     }
 }
 
+/// Extract text from an in-memory upload (API / Lambda). Writes a short-lived
+/// temp file so pdf/docx parsers that need a path still work.
+pub fn extract_text_from_bytes(file_name: &str, bytes: &[u8]) -> Result<String, ExtractError> {
+    let path = Path::new(file_name);
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "pdf" | "docx" | "txt" | "text" | "md" => {}
+        _ => return Err(ExtractError::UnsupportedFormat(extension)),
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut tmp = std::env::temp_dir();
+    let tmp_name = format!("poco-upload-{stamp}.{extension}");
+    tmp.push(tmp_name);
+    std::fs::write(&tmp, bytes).map_err(|e| ExtractError::DocxError(format!("temp write: {e}")))?;
+    let tmp_str = tmp.to_string_lossy().to_string();
+    let result = extract_text(&tmp_str);
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

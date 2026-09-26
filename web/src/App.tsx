@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { sampleReply, sampleText } from './mocks/demo'
 import type { Mapping } from './api'
-import { decodeText, deleteMapping, encodeText, health, upsertMapping, API_STAGE } from './api'
+import { decodeText, deleteMapping, encodeText, extractFile, fileToBase64, health, upsertMapping, API_STAGE } from './api'
 import { Vault } from './components/Vault'
 import './App.css'
 
@@ -60,6 +60,7 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [apiStatus, setApiStatus] = useState<string>('checking…')
   const [sessionId, setSessionId] = useState<string | null>(loadSessionId)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const nextDocumentId = useRef(2)
   const active = documents.find((doc) => doc.id === activeId)!
@@ -171,16 +172,60 @@ function App() {
 
   async function upload(file?: File) {
     if (!file) return
-    if (!/\.(txt|md)$/i.test(file.name)) { setNotice('Choose a .txt or .md file. PDF and DOCX need the backend.'); return }
-    if (file.size > 1_000_000) { setNotice('Choose a text file smaller than 1 MB.'); return }
+    if (!/\.(txt|md|pdf|docx)$/i.test(file.name)) {
+      setNotice('Choose a .txt, .md, .pdf, or .docx file.')
+      return
+    }
+    if (file.size > 5_000_000) {
+      setNotice('Choose a file smaller than 5 MB.')
+      return
+    }
     const documentId = activeId
+    setBusy(true)
     try {
-      const text = await file.text()
+      const isBinary = /\.(pdf|docx)$/i.test(file.name)
+      let text = ''
+      if (isBinary) {
+        const fileBase64 = await fileToBase64(file)
+        const extracted = await extractFile(file.name, fileBase64)
+        text = extracted.text
+        setNotice(`Extracted ${text.length} characters from ${file.name}.`)
+      } else {
+        text = await file.text()
+        setNotice(`File loaded. Ready to ${encoding ? 'encode' : 'decode'}.`)
+      }
       updateDocument(documentId, encoding
         ? { name: file.name, input: text, output: '' }
         : { reply: text, restored: '', unknown: [] })
-      setNotice(`File loaded. Ready to ${encoding ? 'encode' : 'decode'}.`)
-    } catch { setNotice('Could not read this file. Please try again.') }
+    } catch (e) {
+      setNotice(`Upload failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function requestDeleteDocument(id: number) {
+    if (documents.length <= 1) {
+      setNotice('Keep at least one document.')
+      return
+    }
+    setConfirmDeleteId(id)
+    setNotice('Click the × again to delete this document.')
+  }
+
+  function deleteDocument(id: number) {
+    if (documents.length <= 1) {
+      setNotice('Keep at least one document.')
+      setConfirmDeleteId(null)
+      return
+    }
+    const remaining = documents.filter((doc) => doc.id !== id)
+    setDocuments(remaining)
+    if (activeId === id) {
+      setActiveId(remaining[0].id)
+    }
+    setConfirmDeleteId(null)
+    setNotice('Document deleted.')
   }
 
   async function copy(text: string) {
@@ -225,7 +270,31 @@ function App() {
             </div>
           </div>
           <div className="document-tabs" role="group" aria-label="Documents">
-            {documents.map((doc) => <button key={doc.id} aria-pressed={doc.id === activeId} onClick={() => { setActiveId(doc.id); setNotice('') }}>{doc.name}</button>)}
+            {documents.map((doc) => (
+              <div key={doc.id} className={`document-tab${doc.id === activeId ? ' active' : ''}${confirmDeleteId === doc.id ? ' confirming' : ''}`}>
+                <button
+                  className="document-tab-label"
+                  aria-pressed={doc.id === activeId}
+                  onClick={() => { setActiveId(doc.id); setNotice(''); setConfirmDeleteId(null) }}
+                >
+                  {doc.name}
+                </button>
+                <button
+                  type="button"
+                  className="document-tab-close"
+                  aria-label={confirmDeleteId === doc.id ? `Confirm delete ${doc.name}` : `Delete ${doc.name}`}
+                  title={confirmDeleteId === doc.id ? 'Click again to confirm delete' : 'Delete document'}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (confirmDeleteId === doc.id) deleteDocument(doc.id)
+                    else requestDeleteDocument(doc.id)
+                  }}
+                >
+                  ×
+                </button>
+                {confirmDeleteId === doc.id && <span className="document-tab-flash" role="status">Delete?</span>}
+              </div>
+            ))}
             <button className="new-document" onClick={addDocument}>+ New document</button>
           </div>
 
@@ -242,7 +311,7 @@ function App() {
                         : { reply: sampleReply, restored: '', unknown: [] })
                       setNotice('Example loaded.')
                     }}>Use example</button>
-                    <input ref={fileInput} type="file" accept=".txt,.md,text/plain,text/markdown" className="sr-only" tabIndex={-1} aria-label="Upload text file" onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = '' }} />
+                    <input ref={fileInput} type="file" accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="sr-only" tabIndex={-1} aria-label="Upload text, PDF, or DOCX file" onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = '' }} />
                   </div>
                 </div>
                 <textarea

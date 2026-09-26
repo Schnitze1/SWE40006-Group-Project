@@ -55,6 +55,26 @@ Liveness. No auth, no body.
 
 ---
 
+## `POST /api/v1/extract`
+
+Extract text from an uploaded **.txt / .md / .pdf / .docx** file (base64).
+
+**Request**
+
+```json
+{ "fileName": "report.pdf", "fileBase64": "JVBERi0xLjQK…" }
+```
+
+**200**
+
+```json
+{ "fileName": "report.pdf", "text": "Extracted plain text…" }
+```
+
+**400** missing fields, bad base64, or unsupported/scanned format.
+
+---
+
 ## `POST /api/v1/encode`
 
 Redact PII in free text and store mappings under `sessionId`.
