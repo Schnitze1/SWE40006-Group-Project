@@ -1,7 +1,7 @@
 # PII Vault API (v1) 
 
 Runtime: AWS Lambda (Rust) behind API Gateway, **us-east-1**, AWS Academy Learner Lab.  
-Session store: DynamoDB table `pii-sessions-{env}` (LabRole — no custom IAM).
+Session store: DynamoDB table `poco-pii-sessions-{env}` (LabRole — no custom IAM).
 
 All request/response bodies are JSON (`Content-Type: application/json`).  
 All timestamps are **Unix epoch seconds** (numbers).  
@@ -28,7 +28,7 @@ A **session** holds the encode/decode mapping for one document / chat turn.
 | `firstOffset` | number | Byte offset of first occurrence in the source text (display sort key). |
 | `expiresAt` | number | Epoch seconds. DynamoDB TTL (24h / 86400s from write). |
 
-DynamoDB `pii-sessions-{env}` (table name from `DYNAMODB_TABLE`):
+DynamoDB `poco-pii-sessions-{env}` (table name from `DYNAMODB_TABLE`):
 
 * Partition key: `sessionId` (S)
 * Sort key: `token` (S)
@@ -244,5 +244,5 @@ async function decode(sessionId, text) {
 
 * Region is **hardcoded `us-east-1`**.
 * Lambda execution role is the pre-existing **`LabRole`** — never create IAM roles or OIDC providers.
-* DynamoDB `pii-sessions-{env}` TTL on `expiresAt` = **86400 seconds** (24h).
+* DynamoDB `poco-pii-sessions-{env}` TTL on `expiresAt` = **86400 seconds** (24h).
 * CI deploys with **static** `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` GitHub secrets only.
